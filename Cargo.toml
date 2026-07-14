@@ -4,6 +4,11 @@ description = "CLI for querying drive9-server monitoring data (logs, metrics, al
 authors = ["mornyx <mornyx.z@gmail.com>"]
 version = "0.1.0"
 edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/mornyx/drive9-monitor"
+readme = "README.md"
+keywords = ["cli", "monitoring", "observability", "prometheus", "loki"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 anyhow = "1"
