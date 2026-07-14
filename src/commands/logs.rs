@@ -203,8 +203,9 @@ pub fn merge_labels_into_query(
                         let user_labels = parse_selector_labels(selector_str);
                         let merged = merge_label_maps(config_labels, &user_labels);
                         let new_selector = build_selector(&merged);
+                        let prefix = &query[..s];
                         let rest = &query[j + 1..];
-                        return format!("{}{}", new_selector, rest);
+                        return format!("{}{}{}", prefix, new_selector, rest);
                     }
                 }
                 j += 1;

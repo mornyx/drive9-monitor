@@ -2,7 +2,7 @@
 name = "drive9-monitor"
 description = "CLI for querying drive9-server monitoring data (logs, metrics, alerts) across all deployment clusters"
 authors = ["mornyx <mornyx.z@gmail.com>"]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/mornyx/drive9-monitor"
