@@ -1,0 +1,27 @@
+[package]
+name = "drive9-monitor"
+description = "CLI for querying drive9-server monitoring data (logs, metrics, alerts) across all deployment clusters"
+authors = ["mornyx <mornyx.z@gmail.com>"]
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+colored = "2"
+crossterm = { version = "0.28", features = ["event-stream"] }
+dirs = "5"
+futures-util = "0.3"
+hmac = "0.12"
+humantime = "2"
+sha2 = "0.10"
+ratatui = "0.30"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots", "connect"] }
+toml = "0.8"
