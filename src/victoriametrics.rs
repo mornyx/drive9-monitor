@@ -91,8 +91,12 @@ impl VmClient {
             check_http_error(status, &body)?;
         }
 
-        let parsed: ApiResponse = serde_json::from_str(&body)
-            .with_context(|| format!("failed to parse query_range response: {}", truncate(&body, 500)))?;
+        let parsed: ApiResponse = serde_json::from_str(&body).with_context(|| {
+            format!(
+                "failed to parse query_range response: {}",
+                truncate(&body, 500)
+            )
+        })?;
 
         if parsed.status != "success" {
             bail!(

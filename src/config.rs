@@ -11,6 +11,19 @@ pub struct Config {
     pub default_cluster: Option<String>,
     #[serde(default)]
     pub clusters: BTreeMap<String, ClusterConfig>,
+    // Jira (global signal, not per-cluster).
+    #[serde(default)]
+    pub jira: Option<JiraConfig>,
+}
+
+/// Jira configuration (global, not per-cluster).
+#[derive(Debug, Deserialize)]
+pub struct JiraConfig {
+    pub endpoint: String,
+    pub email: String,
+    pub token: String,
+    #[serde(default)]
+    pub labels: BTreeMap<String, String>,
 }
 
 /// Per-cluster config containing optional logs, metrics, and alerts signal configs.
@@ -65,25 +78,24 @@ impl Config {
 
     /// Look up a cluster by key, returning a helpful error if not found.
     pub fn cluster(&self, key: &str) -> Result<&ClusterConfig> {
-        self.clusters
-            .get(key)
-            .with_context(|| {
-                let valid: Vec<&str> = self.clusters.keys().map(|k| k.as_str()).collect();
-                format!(
-                    "unknown cluster '{}'\nvalid clusters: {}",
-                    key,
-                    valid.join(", ")
-                )
-            })
+        self.clusters.get(key).with_context(|| {
+            let valid: Vec<&str> = self.clusters.keys().map(|k| k.as_str()).collect();
+            format!(
+                "unknown cluster '{}'\nvalid clusters: {}",
+                key,
+                valid.join(", ")
+            )
+        })
     }
 
     /// Resolve a cluster key: use the provided key, or fall back to `default_cluster` from config.
     pub fn resolve_cluster_key<'a>(&'a self, opt_key: Option<&'a str>) -> Result<String> {
         match opt_key {
             Some(k) => Ok(k.to_string()),
-            None => self.default_cluster.clone().with_context(|| {
-                "no --cluster specified and no default_cluster set in config"
-            }),
+            None => self
+                .default_cluster
+                .clone()
+                .with_context(|| "no --cluster specified and no default_cluster set in config"),
         }
     }
 

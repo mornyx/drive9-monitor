@@ -134,7 +134,10 @@ impl LokiClient {
             .get(&url)
             .query(&[
                 ("query", query),
-                ("start", &start.timestamp_nanos_opt().unwrap_or(0).to_string()),
+                (
+                    "start",
+                    &start.timestamp_nanos_opt().unwrap_or(0).to_string(),
+                ),
                 ("end", &end.timestamp_nanos_opt().unwrap_or(0).to_string()),
                 ("limit", &limit.to_string()),
                 ("direction", direction.as_str()),
@@ -253,8 +256,8 @@ fn parse_ns_timestamp(ns: &str) -> Result<DateTime<Utc>> {
         .with_context(|| format!("invalid timestamp: {}", ns))?;
     let secs = ns / 1_000_000_000;
     let subsec_nanos = ns % 1_000_000_000;
-    Ok(DateTime::<Utc>::from_timestamp(secs, subsec_nanos as u32)
-        .with_context(|| format!("timestamp out of range: {}", ns))?)
+    DateTime::<Utc>::from_timestamp(secs, subsec_nanos as u32)
+        .with_context(|| format!("timestamp out of range: {}", ns))
 }
 
 /// Truncate a string to `max` chars, appending "..." if truncated.

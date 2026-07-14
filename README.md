@@ -12,6 +12,7 @@ cargo install drive9-monitor
 
 - **Feilian/VPN**: o11y endpoints (Loki, VictoriaMetrics, Alertmanager) are only reachable via Feilian/VPN.
 - **gh CLI**: required for `rules` command (private repo access to `tidbcloud/runbooks`).
+- **Jira Cloud API token**: required for `jira-alerts` command. Create one at https://id.atlassian.com/manage-profile/security/api-tokens.
 
 ## Quick Start
 
@@ -36,6 +37,11 @@ drive9-monitor alerts
 drive9-monitor alerts '{severity="critical"}'
 drive9-monitor alerts --state all
 
+# Query Jira alert tickets (global, not per-cluster)
+drive9-monitor jira-alerts
+drive9-monitor jira-alerts -n 10
+drive9-monitor jira-alerts 'statusCategory != "Done"'
+
 # View alert rule definitions
 drive9-monitor rules
 drive9-monitor rules Drive9ServiceOperationErrorRateHigh
@@ -47,6 +53,11 @@ Config file lives at `~/.config/drive9-monitor/config.toml` (overridable via `--
 
 ```toml
 default_cluster = "prod"
+
+[jira]
+email = "you@pingcap.com"
+token = "ATATT3xFfGF0..."
+labels = {component = "drive9"}
 
 [clusters."prod"]
 logs.source_type = "loki"
@@ -205,6 +216,46 @@ drive9-monitor rules [name]
 
 Requires `gh` CLI installed and authenticated with access to `tidbcloud/runbooks`.
 
+### `jira-alerts`
+
+Query alert tickets from Jira. Unlike `alerts` (per-cluster Alertmanager), Jira is a global signal — all clusters' tickets live in the same O11Y project.
+
+```
+drive9-monitor jira-alerts [--limit <n>] [--output text|json] [<query>]
+```
+
+- `--limit` / `-n`: max number of tickets (default `5`; `0` = all)
+- `--output` / `-o`: `text` (default), `json`
+- `<query>`: optional JQL fragment (e.g. `statusCategory != "Done"`)
+
+Config labels (`jira.labels`) are always applied as base JQL conditions (AND-joined as `key = "value"`). The user query is AND-ed with the base JQL. `ORDER BY created DESC` is appended automatically. At least one condition is required (Jira rejects unrestricted queries).
+
+#### Output Formats
+
+- **text** (default): full block format per ticket:
+  ```
+  TIME PRIORITY KEY STATUS SUMMARY {
+      created=...,
+      updated=...,
+      project=...,
+      components=[...],
+      labels=[...],
+  }
+  ```
+  `TIME` is the `created` timestamp with timezone. Colorized when stdout is a TTY (priority colored: blocker/重要=red, others=yellow).
+- **json**: structured JSON array with all fields per ticket. No transformation — safe for pipe consumption.
+
+#### Jira Config
+
+Top-level config fields (not per-cluster), under a `[jira]` table:
+
+| Field           | Required | Description                                      |
+|-----------------|----------|--------------------------------------------------|
+| `jira.endpoint` | yes      | Jira base URL (e.g. `https://tidb.atlassian.net`) |
+| `jira.email`    | yes      | Atlassian account email for Basic Auth           |
+| `jira.token`    | yes      | Jira Cloud API token                             |
+| `jira.labels`   | no       | Default JQL conditions (e.g. `{component = "drive9"}`) |
+
 ## Alert Investigation Workflow
 
 When an alert is received, follow these steps to investigate:
@@ -235,7 +286,27 @@ drive9-monitor alerts '{severity="critical"}'
 
 Identify the alert by its `alertname`. Note the `startsAt` (when it began), `value` annotation (current trigger value), and any relevant labels.
 
-### 3. Look up the alert rule definition
+### 3. Check Jira for historical alert tickets
+
+Alertmanager only returns **currently active** alerts. Once an alert self-resolves, it disappears from `alerts`. To find historical alert tickets (including already-resolved ones), query Jira:
+
+```sh
+# All drive9 alert tickets (uses jira.labels from config)
+drive9-monitor jira-alerts
+
+# Filter by priority
+drive9-monitor jira-alerts priority=critical
+
+# Filter by status (e.g. only unresolved)
+drive9-monitor jira-alerts 'statusCategory != "Done"'
+
+# Show all tickets
+drive9-monitor jira-alerts -n 0
+```
+
+Jira tickets are created automatically by the alerting system. Each ticket's `summary` contains the alert name (e.g. `[PROD]Drive9CriticalHTTPP99Latency`), so you can correlate a Jira ticket with an active Alertmanager alert by matching the alert name.
+
+### 4. Look up the alert rule definition
 
 ```sh
 drive9-monitor rules <alertname>
@@ -243,7 +314,7 @@ drive9-monitor rules <alertname>
 
 This shows the PromQL `expr` (the condition and threshold that triggers the alert), `for` duration (how long the condition must persist), and `annotations` (description template). Compare the rule's threshold with the alert's `value` to understand why it triggered.
 
-### 4. Investigate with metrics
+### 5. Investigate with metrics
 
 Use the alert's `expr` as a starting point to query the relevant metrics trend:
 
@@ -255,7 +326,7 @@ drive9-monitor metrics -o table '<relevant PromQL>' --since 1h --step 1m
 drive9-monitor metrics -o json '<relevant PromQL>' --since 1h --step 1m
 ```
 
-### 5. Check logs for related errors
+### 6. Check logs for related errors
 
 Look for error-level logs around the alert's `startsAt` time:
 
@@ -270,14 +341,15 @@ drive9-monitor logs -o json '| json | level="error"' --since 30m -n 100
 drive9-monitor logs 'level:error' --since 1h -n 50
 ```
 
-### 6. Summarize findings
+### 7. Summarize findings
 
 Combine the information:
-1. **What**: alert name and summary (from `alerts`)
+1. **What**: alert name and summary (from `alerts` or `jira-alerts`)
 2. **Why**: rule expression and threshold (from `rules`), compared with current `value`
-3. **When**: `startsAt` timestamp
+3. **When**: `startsAt` timestamp (from `alerts`) or `created` timestamp (from `jira-alerts`)
 4. **Trend**: metrics data showing whether the issue is improving or worsening
 5. **Context**: error logs that may explain the root cause
+6. **History**: Jira tickets showing whether this alert has occurred before (from `jira-alerts`)
 
 ## Tips
 

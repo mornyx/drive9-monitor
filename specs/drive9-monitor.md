@@ -41,11 +41,16 @@ TKE clusters do not use TiDB Cloud observability. Instead:
 
 Both use TC3-HMAC-SHA256 signing (Tencent Cloud API v3).
 
+### Jira
+
+Alert tickets are created in Jira Cloud (O11Y project, component drive9) by the alerting system. Unlike logs/metrics/alerts which are per-cluster, Jira is a **global** signal — all clusters' alert tickets land in the same O11Y project and are differentiated by labels and components. The CLI queries Jira via the REST API v3 (`/rest/api/3/search/jql`) using HTTP Basic authentication with an Atlassian account email and an API token. The new cursor-based `/search/jql` endpoint is used (the legacy `/search` endpoint has been deprecated).
+
 ## Goals
 
 - Provide a single CLI to query logs from any drive9 cluster without manually constructing Loki API calls.
 - Provide a single CLI to query metrics from any drive9 cluster without manually constructing VictoriaMetrics API calls.
 - Provide a single CLI to query alerts from any drive9 cluster without manually constructing Alertmanager API calls.
+- Provide a single CLI to query Jira alert tickets without manually constructing Jira API calls.
 - Accept raw LogQL / MetricsQL as the query input so AI/agents can express arbitrarily complex queries without flag-level abstraction leaks.
 - Resolve cluster connection details from a global config file so no endpoint is hardcoded in the binary.
 - Keep the scope narrow: read-only queries. No log ingestion, no alert management, no dashboarding.
@@ -56,6 +61,12 @@ A TOML file at `~/.config/drive9-monitor/config.toml` (overridable via `--config
 
 ```toml
 default_cluster = "prod"
+
+[jira]
+endpoint = "https://tidb.atlassian.net"
+email = "you@pingcap.com"
+token = "ATATT3xFfGF0..."
+labels = {component = "drive9"}
 
 [clusters."aws-ap-southeast-1"]
 logs.source_type = "loki"
@@ -93,6 +104,10 @@ alerts.labels = {component = "drive9"}
 | `alerts.source_type`   | string | no       | `alertmanager`                                   |
 | `alerts.endpoint`      | string | for `alertmanager` | Full Alertmanager base URL                |
 | `alerts.labels`         | map    | no       | Default label selectors appended to every alert query |
+| `jira.endpoint`         | string | yes (for jira-alerts) | Jira base URL (e.g. `https://tidb.atlassian.net`)     |
+| `jira.email`             | string | yes (for jira-alerts) | Atlassian account email for Basic Auth     |
+| `jira.token`             | string | yes (for jira-alerts) | Jira Cloud API token                        |
+| `jira.labels`            | map    | no       | Default JQL conditions (e.g. `{component = "drive9"}`) |
 
 `logs.labels`, `metrics.labels`, and `alerts.labels` are maps of key->value pairs that are AND-ed into every query's label selector. For example `metrics.labels = {container = "drive9-server"}` causes every metrics query to include `{container="drive9-server"}`. Multiple clusters sharing the same endpoint differ only in their labels.
 
@@ -259,6 +274,41 @@ Config labels (`alerts.labels`) are always applied as filters — same merge rul
   `TIME` is the `startsAt` timestamp in human-friendly format with timezone (e.g. `2026-07-14 15:30:00 +08:00`), `SEVERITY` is from the `severity` label, `NAME` is from the `alertname` label, `STATE` is the alert state (active/silenced/inhibited). The block includes `startsAt`, `endsAt`, `fingerprint`, all `labels` (in alphabetical order, excluding `severity` and `alertname` which are in the header), and all `annotations` (in alphabetical order). Colorized when stdout is a TTY (severity colored by level: critical/major=red, warning=yellow, info=green).
 - **json**: the raw Alertmanager API v2 JSON response (array of alert objects), one JSON array. No transformation — suitable for AI/agent parsing.
 
+### `jira-alerts`
+
+Query alert tickets from Jira. Unlike `alerts` (per-cluster Alertmanager), Jira is a global signal — all clusters' tickets live in the same O11Y project.
+
+```
+drive9-monitor jira-alerts [flags] [query]
+```
+
+#### Arguments
+
+| Flag          | Short | Type    | Default        | Description                                       |
+|---------------|-------|---------|----------------|---------------------------------------------------|
+| `--limit`     | `-n`  | int     | `5`            | Max number of tickets to return (`0` = all)       |
+| `--output`    | `-o`  | string  | `text`         | Output format: `text` \| `json`                  |
+| `--config`    |       | string  | (default path) | Path to config file                               |
+
+`[query]` is an optional positional argument containing a JQL expression fragment (e.g. `statusCategory != "Done"` or `project = "O11Y"`). If omitted, only config labels are used as JQL conditions.
+
+Config labels (`jira.labels`) are always applied as base JQL conditions, AND-joined as `key = "value"` pairs (e.g. `{component = "drive9"}` becomes `component = "drive9"`). The user query is AND-ed with the base JQL. `ORDER BY created DESC` is appended automatically.
+
+#### Output formats
+
+- **text** (default): one ticket per entry, multi-line block format:
+  ```
+  TIME PRIORITY KEY STATUS SUMMARY {
+      created=...,
+      updated=...,
+      project=...,
+      components=[...],
+      labels=[...],
+  }
+  ```
+  `TIME` is the `created` timestamp in human-friendly format with timezone (e.g. `2026-07-14 20:18:19 +08:00`). `PRIORITY` is from the Jira priority field. `KEY` is the issue key (e.g. `O11Y-2615909`). `STATUS` is the status name. `SUMMARY` is the issue summary. The block also includes `created`, `updated`, `project`, `components` (list of component names), and `labels` (list of label strings). Colorized when stdout is a TTY (priority colored: blocker/重要=red, others=yellow).
+- **json**: the raw Jira API v3 JSON response (array of issue objects). No transformation — suitable for AI/agent parsing.
+
 ### `rules`
 
 Show alert rule definitions fetched from the [runbooks repository](https://github.com/tidbcloud/runbooks). The rules file is a Prometheus alerting rules YAML hosted at `rules/mem9/mnemos/drive9-alerts.yaml` in the `tidbcloud/runbooks` private repo. Access requires the `gh` CLI with valid authentication to the repo.
@@ -366,6 +416,29 @@ Query construction:
 3. The `active`, `silenced`, and `inhibited` boolean parameters are derived from the `--state` flag.
 4. Response: a JSON array of alert objects, each with `labels`, `annotations`, `startsAt`, `endsAt`, `status.state`, `fingerprint`, and `receivers`.
 
+## Jira API usage
+
+### Jira Cloud (`jira.endpoint` / `jira.email` / `jira.token`)
+
+The CLI targets the Jira REST API v3. The `jira.endpoint` in config is the Jira base URL (e.g. `https://tidb.atlassian.net`). API paths are appended directly to the endpoint.
+
+| CLI command     | API path                          |
+|-----------------|-----------------------------------|
+| `jira-alerts`   | `/rest/api/3/search/jql`          |
+
+Authentication: HTTP Basic Auth with `jira.email` as the username and `jira.token` as the password.
+
+Query construction:
+
+1. Config labels (`jira.labels`) are always converted to JQL conditions as `key = "value"` pairs and AND-joined (e.g. `{component = "drive9"}` becomes `component = "drive9"`).
+2. The user query (if provided) is AND-ed with the base JQL conditions.
+3. `ORDER BY created DESC` is appended automatically.
+4. The final JQL is sent as the `jql` query parameter.
+
+Pagination: the `/search/jql` endpoint uses cursor-based pagination. The CLI fetches pages of 100 issues at a time using the `nextPageToken` parameter until `--limit` is reached or `isLast` is true. `--limit 0` fetches all pages.
+
+Response: `issues[]` array, each issue has `key`, `id`, and `fields.{summary, status.{name, statusCategory.{key}}, priority.{name}, created, updated, project.{key, name}, components[].name, labels[]}`.
+
 ## Rules API usage
 
 The CLI fetches alert rule definitions from the `tidbcloud/runbooks` private GitHub repository via the `gh` CLI. The rules file is a Prometheus alerting rules YAML at `rules/mem9/mnemos/drive9-alerts.yaml`.
@@ -380,4 +453,5 @@ The CLI fetches alert rule definitions from the `tidbcloud/runbooks` private Git
 - Config file missing -> error with the expected path and a hint to run `clusters` after creating it.
 - HTTP 403 -> the endpoint rejected the request (likely an auth/network issue reachable only via Feilian/VPN). Print a prominent hint telling the user to connect to Feilian first, ahead of any other error detail.
 - Other network / HTTP errors -> error with status code and response body snippet.
+- Jira 401/403 -> error with a hint to check `jira.email` and `jira.token` in config (API token may be expired or revoked).
 - Loki/VictoriaMetrics/Alertmanager/Tencent Cloud API error responses (non-2xx) -> parsed and displayed with the error message.

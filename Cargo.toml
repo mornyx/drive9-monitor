@@ -2,7 +2,7 @@
 name = "drive9-monitor"
 description = "CLI for querying drive9-server monitoring data (logs, metrics, alerts) across all deployment clusters"
 authors = ["mornyx <mornyx.z@gmail.com>"]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/mornyx/drive9-monitor"
@@ -15,18 +15,18 @@ anyhow = "1"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
-colored = "2"
-crossterm = { version = "0.28", features = ["event-stream"] }
-dirs = "5"
+colored = "3"
+crossterm = { version = "0.29", features = ["event-stream"] }
+dirs = "6"
 futures-util = "0.3"
-hmac = "0.12"
+hmac = "0.13"
 humantime = "2"
-sha2 = "0.10"
 ratatui = "0.30"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_yaml = "0.9"
+serde_yaml_neo = "0.11"
+sha2 = "0.11"
 tokio = { version = "1", features = ["full"] }
-tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots", "connect"] }
-toml = "0.8"
+tokio-tungstenite = { version = "0.30", features = ["connect", "rustls-tls-native-roots"] }
+toml = "1"

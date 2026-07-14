@@ -5,10 +5,7 @@ use anyhow::Error;
 /// Special-cases HTTP 403 responses with a prominent Feilian hint, since the
 /// Loki endpoints are only reachable via Feilian/VPN.
 pub fn render(err: &Error) -> String {
-    let chain: Vec<String> = err
-        .chain()
-        .map(|e| e.to_string())
-        .collect();
+    let chain: Vec<String> = err.chain().map(|e| e.to_string()).collect();
 
     // Check for 403 anywhere in the error chain.
     for msg in &chain {

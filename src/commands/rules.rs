@@ -46,16 +46,20 @@ impl Rule {
 /// Entry point for the `rules` subcommand.
 pub async fn run(name: Option<&str>) -> Result<()> {
     let yaml = fetch_rules().await?;
-    let rules_file: RulesFile = serde_yaml::from_str(&yaml)
-        .context("failed to parse rules YAML")?;
+    let rules_file: RulesFile =
+        serde_yaml_neo::from_str(&yaml).context("failed to parse rules YAML")?;
 
-    let all_rules: Vec<&Rule> = rules_file.groups.iter()
+    let all_rules: Vec<&Rule> = rules_file
+        .groups
+        .iter()
         .flat_map(|g| g.rules.iter())
         .collect();
 
     match name {
         Some(n) => {
-            let rule = all_rules.iter().find(|r| r.alert == n)
+            let rule = all_rules
+                .iter()
+                .find(|r| r.alert == n)
                 .with_context(|| format!("alert rule '{}' not found", n))?;
             print_rule_detail(rule);
         }
@@ -75,7 +79,8 @@ async fn fetch_rules() -> Result<String> {
         .args([
             "api",
             "repos/tidbcloud/runbooks/contents/rules/mem9/mnemos/drive9-alerts.yaml",
-            "--jq", ".content",
+            "--jq",
+            ".content",
         ])
         .output()
         .await
@@ -93,8 +98,7 @@ async fn fetch_rules() -> Result<String> {
         bail!("gh CLI error: {}", err.trim());
     }
 
-    let base64_content = String::from_utf8(output.stdout)
-        .context("invalid output from gh CLI")?;
+    let base64_content = String::from_utf8(output.stdout).context("invalid output from gh CLI")?;
     let base64_content = base64_content.trim().replace('\n', "");
 
     // Decode base64.
@@ -107,22 +111,44 @@ async fn fetch_rules() -> Result<String> {
 }
 
 fn print_rule_list(rule: &Rule) {
-    let severity = rule.labels.get("severity").map(|s| s.as_str()).unwrap_or("info");
-    let summary = rule.annotations.get("summary").map(|s| s.as_str()).unwrap_or("");
+    let severity = rule
+        .labels
+        .get("severity")
+        .map(|s| s.as_str())
+        .unwrap_or("info");
+    let summary = rule
+        .annotations
+        .get("summary")
+        .map(|s| s.as_str())
+        .unwrap_or("");
     let use_color = std::io::stdout().is_terminal();
     if use_color {
-        println!("{} {} — {}", colorize_severity(severity), rule.alert.bold(), summary);
+        println!(
+            "{} {} — {}",
+            colorize_severity(severity),
+            rule.alert.bold(),
+            summary
+        );
     } else {
         println!("{} {} — {}", severity, rule.alert, summary);
     }
 }
 
 fn print_rule_detail(rule: &Rule) {
-    let severity = rule.labels.get("severity").map(|s| s.as_str()).unwrap_or("info");
+    let severity = rule
+        .labels
+        .get("severity")
+        .map(|s| s.as_str())
+        .unwrap_or("info");
     let use_color = std::io::stdout().is_terminal();
 
     if use_color {
-        println!("{} ({}, {})", rule.alert.bold(), colorize_severity(severity), rule.for_str());
+        println!(
+            "{} ({}, {})",
+            rule.alert.bold(),
+            colorize_severity(severity),
+            rule.for_str()
+        );
     } else {
         println!("{} ({}, {})", rule.alert, severity, rule.for_str());
     }

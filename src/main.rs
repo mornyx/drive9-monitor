@@ -2,6 +2,7 @@ mod alertmanager;
 mod commands;
 mod config;
 mod error;
+mod jira;
 mod loki;
 mod tencentcloud;
 mod tke_cls;
@@ -14,6 +15,7 @@ use clap::{Parser, Subcommand};
 
 use crate::commands::alerts::{self, AlertsArgs};
 use crate::commands::clusters;
+use crate::commands::jira_alerts::{self, JiraAlertsArgs};
 use crate::commands::logs::{self, LogsArgs};
 use crate::commands::metrics::{self, MetricsArgs};
 use crate::commands::rules;
@@ -42,10 +44,40 @@ enum ClustersSub {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Query alerts from a cluster.
+    Alerts {
+        /// Cluster key from config, or default_cluster from config if omitted.
+        #[arg(short, long)]
+        cluster: Option<String>,
+
+        /// Alert state filter: active, silenced, inhibited, or all.
+        #[arg(long, default_value = "active")]
+        state: String,
+
+        /// Output format: text or json.
+        #[arg(short, long, default_value = "text")]
+        output: String,
+
+        /// Alertmanager label matcher expression (e.g. {severity="critical"}).
+        query: Option<String>,
+    },
     /// List all configured clusters, or set the default cluster.
     Clusters {
         #[command(subcommand)]
         subcommand: Option<ClustersSub>,
+    },
+    /// Query alert tickets from Jira (global, not per-cluster).
+    JiraAlerts {
+        /// Max number of tickets to return (0 = all).
+        #[arg(short = 'n', long, default_value = "5")]
+        limit: usize,
+
+        /// Output format: text or json.
+        #[arg(short, long, default_value = "text")]
+        output: String,
+
+        /// Optional JQL expression fragment (e.g. `statusCategory != "Done"`).
+        query: Option<String>,
     },
     /// Query logs from a cluster.
     Logs {
@@ -117,23 +149,6 @@ enum Command {
         /// MetricsQL / PromQL query expression.
         query: String,
     },
-    /// Query alerts from a cluster.
-    Alerts {
-        /// Cluster key from config, or default_cluster from config if omitted.
-        #[arg(short, long)]
-        cluster: Option<String>,
-
-        /// Alert state filter: active, silenced, inhibited, or all.
-        #[arg(long, default_value = "active")]
-        state: String,
-
-        /// Output format: text or json.
-        #[arg(short, long, default_value = "text")]
-        output: String,
-
-        /// Alertmanager label matcher expression (e.g. {severity="critical"}).
-        query: Option<String>,
-    },
     /// Show alert rule definitions from the runbooks repo.
     Rules {
         /// Optional alert name to show full definition. If omitted, lists all rules.
@@ -156,6 +171,21 @@ async fn main() -> ExitCode {
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
+        Command::Alerts {
+            cluster,
+            state,
+            output,
+            query,
+        } => {
+            let config = Config::load(cli.config.as_deref())?;
+            let args = AlertsArgs {
+                cluster,
+                query,
+                state,
+                output,
+            };
+            alerts::run(&config, args).await
+        }
         Command::Clusters { subcommand } => {
             let config = Config::load(cli.config.as_deref())?;
             match subcommand {
@@ -168,6 +198,19 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 }
             }
             Ok(())
+        }
+        Command::JiraAlerts {
+            limit,
+            output,
+            query,
+        } => {
+            let config = Config::load(cli.config.as_deref())?;
+            let args = JiraAlertsArgs {
+                limit,
+                output,
+                query,
+            };
+            jira_alerts::run(&config, args).await
         }
         Command::Logs {
             cluster,
@@ -217,23 +260,6 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             };
             metrics::run(&config, args).await
         }
-        Command::Alerts {
-            cluster,
-            state,
-            output,
-            query,
-        } => {
-            let config = Config::load(cli.config.as_deref())?;
-            let args = AlertsArgs {
-                cluster,
-                query,
-                state,
-                output,
-            };
-            alerts::run(&config, args).await
-        }
-        Command::Rules { name } => {
-            rules::run(name.as_deref()).await
-        }
+        Command::Rules { name } => rules::run(name.as_deref()).await,
     }
 }

@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use reqwest::Client;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -58,7 +58,7 @@ impl TcClient {
         let body_str = serde_json::to_string(body).context("failed to serialize request body")?;
         let timestamp = chrono::Utc::now().timestamp();
         let date = DateTime::<Utc>::from_timestamp(timestamp, 0)
-            .unwrap_or_else(|| Utc::now())
+            .unwrap_or_else(Utc::now)
             .format("%Y-%m-%d")
             .to_string();
 
@@ -92,10 +92,7 @@ impl TcClient {
         let secret_signing = hmac_sha256(&secret_service, b"tc3_request");
 
         // Stage 4: compute signature
-        let signature = hex_encode(&hmac_sha256(
-            &secret_signing,
-            string_to_sign.as_bytes(),
-        ));
+        let signature = hex_encode(&hmac_sha256(&secret_signing, string_to_sign.as_bytes()));
 
         // Stage 5: authorization header
         let authorization = format!(
@@ -131,13 +128,23 @@ impl TcClient {
             );
         }
 
-        let parsed: serde_json::Value = serde_json::from_str(&resp_text)
-            .with_context(|| format!("failed to parse Tencent Cloud API response: {}", truncate(&resp_text, 500)))?;
+        let parsed: serde_json::Value = serde_json::from_str(&resp_text).with_context(|| {
+            format!(
+                "failed to parse Tencent Cloud API response: {}",
+                truncate(&resp_text, 500)
+            )
+        })?;
 
         // Check for API-level error
         if let Some(error) = parsed.get("Response").and_then(|r| r.get("Error")) {
-            let code = error.get("Code").and_then(|c| c.as_str()).unwrap_or("unknown");
-            let message = error.get("Message").and_then(|m| m.as_str()).unwrap_or("unknown");
+            let code = error
+                .get("Code")
+                .and_then(|c| c.as_str())
+                .unwrap_or("unknown");
+            let message = error
+                .get("Message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("unknown");
             bail!("Tencent Cloud API error: {} — {}", code, message);
         }
 

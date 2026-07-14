@@ -32,12 +32,7 @@ struct ClsLogInfo {
 }
 
 impl TkeClsClient {
-    pub fn new(
-        secret_id: &str,
-        secret_key: &str,
-        topic_id: &str,
-        region: &str,
-    ) -> Result<Self> {
+    pub fn new(secret_id: &str, secret_key: &str, topic_id: &str, region: &str) -> Result<Self> {
         let tc = TcClient::new(
             secret_id,
             secret_key,
@@ -69,8 +64,8 @@ impl TkeClsClient {
 
         let response = self.tc.call_api("SearchLog", "2020-10-16", &body).await?;
 
-        let parsed: SearchLogResponse = serde_json::from_value(response)
-            .context("failed to parse SearchLog response")?;
+        let parsed: SearchLogResponse =
+            serde_json::from_value(response).context("failed to parse SearchLog response")?;
 
         let mut entries = Vec::new();
         for log_info in parsed.Results {
@@ -78,7 +73,7 @@ impl TkeClsClient {
                 log_info.Time / 1000,
                 ((log_info.Time % 1000) * 1_000_000) as u32,
             )
-            .unwrap_or_else(|| Utc::now());
+            .unwrap_or_else(Utc::now);
             entries.push(LogEntry {
                 ts,
                 labels: BTreeMap::new(),

@@ -5,7 +5,7 @@ use chrono::{DateTime, Duration, Utc};
 use colored::Colorize;
 
 use crate::config::Config;
-use crate::loki::{Direction, LokiClient, LogEntry};
+use crate::loki::{Direction, LogEntry, LokiClient};
 
 /// Output format for log entries.
 enum OutputFormat {
@@ -20,7 +20,10 @@ impl OutputFormat {
             "raw" => Ok(Self::Raw),
             "json" => Ok(Self::Json),
             "text" => Ok(Self::Text),
-            other => anyhow::bail!("invalid output format '{}': expected raw, json, or text", other),
+            other => anyhow::bail!(
+                "invalid output format '{}': expected raw, json, or text",
+                other
+            ),
         }
     }
 }
@@ -56,14 +59,7 @@ pub async fn run(config: &Config, args: LogsArgs) -> Result<()> {
                 let direction = Direction::parse(&args.direction)?;
                 let (start, end) = resolve_time_range(&args.since, &args.from, &args.to)?;
                 run_query_range(
-                    &client,
-                    &query,
-                    start,
-                    end,
-                    args.limit,
-                    direction,
-                    &output,
-                    use_color,
+                    &client, &query, start, end, args.limit, direction, &output, use_color,
                 )
                 .await
             }
@@ -72,17 +68,29 @@ pub async fn run(config: &Config, args: LogsArgs) -> Result<()> {
             if args.follow {
                 anyhow::bail!("--follow is not supported for tke_cls source type");
             }
-            let secret_id = logs.secret_id.as_ref().context("tke_cls requires secret_id")?;
-            let secret_key = logs.secret_key.as_ref().context("tke_cls requires secret_key")?;
-            let topic_id = logs.topic_id.as_ref().context("tke_cls requires topic_id")?;
+            let secret_id = logs
+                .secret_id
+                .as_ref()
+                .context("tke_cls requires secret_id")?;
+            let secret_key = logs
+                .secret_key
+                .as_ref()
+                .context("tke_cls requires secret_key")?;
+            let topic_id = logs
+                .topic_id
+                .as_ref()
+                .context("tke_cls requires topic_id")?;
             let region = logs.region.as_ref().context("tke_cls requires region")?;
-            let client = crate::tke_cls::TkeClsClient::new(secret_id, secret_key, topic_id, region)?;
+            let client =
+                crate::tke_cls::TkeClsClient::new(secret_id, secret_key, topic_id, region)?;
 
             let query = resolve_cls_query(&args.query, &logs.labels);
             let (start, end) = resolve_time_range(&args.since, &args.from, &args.to)?;
             let from_ms = start.timestamp_millis();
             let to_ms = end.timestamp_millis();
-            let entries = client.search_log(from_ms, to_ms, args.limit, &query).await?;
+            let entries = client
+                .search_log(from_ms, to_ms, args.limit, &query)
+                .await?;
 
             // CLS returns newest-first by default. Reverse for chronological order.
             for entry in entries.into_iter().rev() {
@@ -266,8 +274,12 @@ fn resolve_time_range(
     let start = match from {
         Some(f) => parse_rfc3339(f)?,
         None => {
-            let dur = humantime::parse_duration(since)
-                .with_context(|| format!("invalid --since duration '{}': expected e.g. 30m, 2h, 1d", since))?;
+            let dur = humantime::parse_duration(since).with_context(|| {
+                format!(
+                    "invalid --since duration '{}': expected e.g. 30m, 2h, 1d",
+                    since
+                )
+            })?;
             end - Duration::from_std(dur)?
         }
     };
@@ -282,6 +294,7 @@ fn parse_rfc3339(s: &str) -> Result<DateTime<Utc>> {
 }
 
 /// Execute a query_range request and print results.
+#[allow(clippy::too_many_arguments)]
 async fn run_query_range(
     client: &LokiClient,
     query: &str,
@@ -292,7 +305,9 @@ async fn run_query_range(
     output: &OutputFormat,
     use_color: bool,
 ) -> Result<()> {
-    let entries = client.query_range(query, start, end, limit, direction).await?;
+    let entries = client
+        .query_range(query, start, end, limit, direction)
+        .await?;
 
     // Loki returns entries in query direction order. For backward (default),
     // entries are newest-first. For display, reverse to chronological order.
@@ -344,7 +359,10 @@ fn print_entry(entry: &LogEntry, output: &OutputFormat, use_color: bool) {
             if let Ok(obj) = serde_json::from_str::<serde_json::Value>(&entry.line) {
                 if let serde_json::Value::Object(map) = obj {
                     let level = map.get("level").and_then(|v| v.as_str()).unwrap_or("?");
-                    let msg = map.get("msg").and_then(|v| v.as_str()).unwrap_or(&entry.line);
+                    let msg = map
+                        .get("msg")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(&entry.line);
 
                     // Collect remaining fields (exclude level, msg).
                     let reserved: &[&str] = &["level", "msg"];
@@ -367,9 +385,17 @@ fn print_entry(entry: &LogEntry, output: &OutputFormat, use_color: bool) {
                     }
 
                     if use_color {
-                        let mut colored = format!("{} {} {}", ts_human.cyan(), colorize_level(level), msg);
+                        let mut colored =
+                            format!("{} {} {}", ts_human.cyan(), colorize_level(level), msg);
                         if !extra_joined.is_empty() {
-                            colored.push_str(&format!(" {}", extra_str.iter().map(|s| s.dimmed().to_string()).collect::<Vec<_>>().join(" ")));
+                            colored.push_str(&format!(
+                                " {}",
+                                extra_str
+                                    .iter()
+                                    .map(|s| s.dimmed().to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(" ")
+                            ));
                         }
                         println!("{}", colored);
                     } else {
@@ -437,4 +463,3 @@ fn format_json_value(value: &serde_json::Value) -> String {
         }
     }
 }
-

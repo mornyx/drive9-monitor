@@ -40,12 +40,7 @@ struct SeriesEntry {
 }
 
 impl TkePromClient {
-    pub fn new(
-        secret_id: &str,
-        secret_key: &str,
-        instance_id: &str,
-        region: &str,
-    ) -> Result<Self> {
+    pub fn new(secret_id: &str, secret_key: &str, instance_id: &str, region: &str) -> Result<Self> {
         let tc = TcClient::new(
             secret_id,
             secret_key,
@@ -93,8 +88,12 @@ impl TkePromClient {
             .and_then(|r| r.as_str())
             .context("response missing HTTP.ResponseBody")?;
 
-        let parsed: ApiResponse = serde_json::from_str(response_body)
-            .with_context(|| format!("failed to parse Prometheus response: {}", &response_body[..response_body.len().min(500)]))?;
+        let parsed: ApiResponse = serde_json::from_str(response_body).with_context(|| {
+            format!(
+                "failed to parse Prometheus response: {}",
+                &response_body[..response_body.len().min(500)]
+            )
+        })?;
 
         if parsed.status != "success" {
             anyhow::bail!(

@@ -99,8 +99,9 @@ impl AmClient {
             );
         }
 
-        let raw: Vec<RawAlert> = serde_json::from_str(&body)
-            .with_context(|| format!("failed to parse alerts response: {}", truncate(&body, 500)))?;
+        let raw: Vec<RawAlert> = serde_json::from_str(&body).with_context(|| {
+            format!("failed to parse alerts response: {}", truncate(&body, 500))
+        })?;
 
         let alerts = raw
             .into_iter()

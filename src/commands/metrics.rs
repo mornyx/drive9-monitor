@@ -31,7 +31,10 @@ impl OutputFormat {
             "tui" => Ok(Self::Tui),
             "table" => Ok(Self::Table),
             "json" => Ok(Self::Json),
-            other => anyhow::bail!("invalid output format '{}': expected tui, table, or json", other),
+            other => anyhow::bail!(
+                "invalid output format '{}': expected tui, table, or json",
+                other
+            ),
         }
     }
 }
@@ -69,16 +72,29 @@ pub async fn run(config: &Config, args: MetricsArgs) -> Result<()> {
         .with_context(|| format!("invalid --step duration '{}'", args.step))?;
 
     let backend = match metrics.source_type.as_str() {
-        "prometheus" => {
-            MetricsBackend::Vm(VmClient::new(&metrics.endpoint)?)
-        }
+        "prometheus" => MetricsBackend::Vm(VmClient::new(&metrics.endpoint)?),
         "tke_prometheus" => {
-            let secret_id = metrics.secret_id.as_ref().context("tke_prometheus requires secret_id")?;
-            let secret_key = metrics.secret_key.as_ref().context("tke_prometheus requires secret_key")?;
-            let instance_id = metrics.instance_id.as_ref().context("tke_prometheus requires instance_id")?;
-            let region = metrics.region.as_ref().context("tke_prometheus requires region")?;
+            let secret_id = metrics
+                .secret_id
+                .as_ref()
+                .context("tke_prometheus requires secret_id")?;
+            let secret_key = metrics
+                .secret_key
+                .as_ref()
+                .context("tke_prometheus requires secret_key")?;
+            let instance_id = metrics
+                .instance_id
+                .as_ref()
+                .context("tke_prometheus requires instance_id")?;
+            let region = metrics
+                .region
+                .as_ref()
+                .context("tke_prometheus requires region")?;
             MetricsBackend::TkeProm(crate::tke_prometheus::TkePromClient::new(
-                secret_id, secret_key, instance_id, region,
+                secret_id,
+                secret_key,
+                instance_id,
+                region,
             )?)
         }
         other => anyhow::bail!("unsupported metrics source_type '{}'", other),
@@ -114,13 +130,15 @@ async fn run_tui(
     step: Duration,
     refresh: Duration,
 ) -> Result<()> {
-    use crossterm::execute;
-    use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
-    use crossterm::event::{Event, KeyCode, KeyEventKind};
     use crossterm::event::EventStream;
+    use crossterm::event::{Event, KeyCode, KeyEventKind};
+    use crossterm::execute;
+    use crossterm::terminal::{
+        EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    };
     use futures_util::StreamExt;
-    use ratatui::backend::CrosstermBackend;
     use ratatui::Terminal;
+    use ratatui::backend::CrosstermBackend;
     use std::io::stdout;
 
     enable_raw_mode().context("failed to enable raw mode")?;
@@ -152,7 +170,15 @@ async fn run_tui(
 
         // Render.
         terminal.draw(|f| {
-            draw_tui(f, query, &cluster_key, refresh, next_refresh, &last_series, last_error.as_deref());
+            draw_tui(
+                f,
+                query,
+                cluster_key,
+                refresh,
+                next_refresh,
+                &last_series,
+                last_error.as_deref(),
+            );
         })?;
 
         // Wait for either a key event or the next refresh time.
@@ -161,8 +187,8 @@ async fn run_tui(
         tokio::select! {
             _ = tokio::time::sleep(wait) => {}
             maybe_event = event_stream.next() => {
-                if let Some(Ok(Event::Key(key))) = maybe_event {
-                    if key.kind == KeyEventKind::Press {
+                if let Some(Ok(Event::Key(key))) = maybe_event
+                    && key.kind == KeyEventKind::Press {
                         match key.code {
                             KeyCode::Char('q') | KeyCode::Char('Q') => break,
                             KeyCode::Char('r') | KeyCode::Char('R') => {
@@ -171,19 +197,20 @@ async fn run_tui(
                             _ => {}
                         }
                     }
-                }
             }
         }
     }
 
     disable_raw_mode().context("failed to disable raw mode")?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen).context("failed to leave alternate screen")?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)
+        .context("failed to leave alternate screen")?;
     terminal.show_cursor().context("failed to show cursor")?;
 
     Ok(())
 }
 
 /// Draw the TUI.
+#[allow(clippy::too_many_arguments)]
 fn draw_tui(
     frame: &mut ratatui::Frame,
     query: &str,
@@ -196,14 +223,18 @@ fn draw_tui(
     use ratatui::layout::{Constraint, Direction, Layout};
     use ratatui::style::{Color, Modifier, Style};
     use ratatui::text::{Line, Span};
-    use ratatui::widgets::{Axis, Block, Chart, Dataset, Paragraph, Borders};
+    use ratatui::widgets::{Axis, Block, Borders, Chart, Dataset, Paragraph};
 
     // Layout: chart (main) + legend + bottom bar.
     let legend_height = series.len().min(6) as u16 + 2; // +2 for borders
     let area = frame.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(5), Constraint::Length(legend_height), Constraint::Length(3)])
+        .constraints([
+            Constraint::Min(5),
+            Constraint::Length(legend_height),
+            Constraint::Length(3),
+        ])
         .split(area);
 
     // Chart area.
@@ -223,7 +254,14 @@ fn draw_tui(
         frame.render_widget(para, chunks[0]);
     } else {
         // Build datasets.
-        let colors = [Color::Cyan, Color::Green, Color::Yellow, Color::Magenta, Color::Blue, Color::Red];
+        let colors = [
+            Color::Cyan,
+            Color::Green,
+            Color::Yellow,
+            Color::Magenta,
+            Color::Blue,
+            Color::Red,
+        ];
         let all_data: Vec<Vec<(f64, f64)>> = series
             .iter()
             .map(|s| {
@@ -274,7 +312,10 @@ fn draw_tui(
                     .bounds([x_min, x_max])
                     .labels(vec![
                         Span::styled(format_time_label(x_min), Style::default().fg(Color::Gray)),
-                        Span::styled(format_time_label((x_min + x_max) / 2.0), Style::default().fg(Color::Gray)),
+                        Span::styled(
+                            format_time_label((x_min + x_max) / 2.0),
+                            Style::default().fg(Color::Gray),
+                        ),
                         Span::styled(format_time_label(x_max), Style::default().fg(Color::Gray)),
                     ]),
             )
@@ -285,7 +326,10 @@ fn draw_tui(
                     .bounds([y_min, y_max])
                     .labels(vec![
                         Span::styled(format!("{:.2}", y_min), Style::default().fg(Color::Gray)),
-                        Span::styled(format!("{:.2}", (y_min + y_max) / 2.0), Style::default().fg(Color::Gray)),
+                        Span::styled(
+                            format!("{:.2}", (y_min + y_max) / 2.0),
+                            Style::default().fg(Color::Gray),
+                        ),
                         Span::styled(format!("{:.2}", y_max), Style::default().fg(Color::Gray)),
                     ]),
             );
@@ -293,7 +337,14 @@ fn draw_tui(
     }
 
     // Legend.
-    let colors = [Color::Cyan, Color::Green, Color::Yellow, Color::Magenta, Color::Blue, Color::Red];
+    let colors = [
+        Color::Cyan,
+        Color::Green,
+        Color::Yellow,
+        Color::Magenta,
+        Color::Blue,
+        Color::Red,
+    ];
     let legend_lines: Vec<Line> = series
         .iter()
         .enumerate()
@@ -309,14 +360,15 @@ fn draw_tui(
             let label_str = labels.join(", ");
             Line::from(vec![
                 Span::styled("● ", Style::default().fg(color)),
-                Span::styled(name, Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    name,
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
                 Span::raw(format!(" {{{}}}", label_str)),
             ])
         })
         .collect();
-    let legend_block = Block::default()
-        .borders(Borders::ALL)
-        .title(" legend ");
+    let legend_block = Block::default().borders(Borders::ALL).title(" legend ");
     let legend = Paragraph::new(legend_lines).block(legend_block);
     frame.render_widget(legend, chunks[1]);
 
@@ -325,16 +377,14 @@ fn draw_tui(
     let secs_until = next_refresh.saturating_duration_since(now).as_secs();
     let bottom = Line::from(vec![
         Span::styled(
-            format!(" q:quit  r:refresh  "),
+            " q:quit  r:refresh  ".to_string(),
             Style::default().add_modifier(Modifier::BOLD),
         ),
         Span::raw(format!("refresh={}s  ", refresh.as_secs())),
         Span::raw(format!("next in {}s  ", secs_until)),
         Span::styled(query, Style::default().fg(Color::DarkGray)),
     ]);
-    let bottom_block = Block::default()
-        .borders(Borders::ALL)
-        .title(" controls ");
+    let bottom_block = Block::default().borders(Borders::ALL).title(" controls ");
     let para = Paragraph::new(bottom).block(bottom_block);
     frame.render_widget(para, chunks[2]);
 }
@@ -369,9 +419,7 @@ fn print_json(series: &[MetricSeries]) {
             let values: Vec<serde_json::Value> = s
                 .points
                 .iter()
-                .map(|(dt, v)| {
-                    serde_json::json!([dt.timestamp(), format!("{}", v)])
-                })
+                .map(|(dt, v)| serde_json::json!([dt.timestamp(), format!("{}", v)]))
                 .collect();
             serde_json::json!({
                 "metric": s.metric,
@@ -406,14 +454,14 @@ fn print_table(series: &[MetricSeries]) {
 
     // Header.
     let mut header = format!("{:<20}", "TIME");
-    for (i, s) in series.iter().enumerate() {
+    for s in series.iter() {
         let label = format_series_label(&s.metric);
         let label = if label.len() > 30 {
             format!("{}...", &label[..27])
         } else {
             label
         };
-        header.push_str(&format!("  {:>15}", if i == 0 { label } else { label }));
+        header.push_str(&format!("  {:>15}", label));
     }
     println!("{}", header);
     println!("{}", "-".repeat(header.len()));
