@@ -4,54 +4,33 @@ A CLI tool for querying monitoring data (logs, metrics, and alerts) from [drive9
 
 ## Background
 
-drive9-server is deployed to multiple clusters across regions and cloud providers. Most clusters use TiDB Cloud observability (Loki + VictoriaMetrics + Alertmanager). Tencent Cloud TKE clusters use native CLS (logs) and TMP Prometheus (metrics) instead, accessed via Tencent Cloud API v3 with AK/SK authentication. TKE clusters do not have Alertmanager; alerts are only available for clusters using TiDB Cloud observability.
+drive9-server is deployed to multiple clusters across regions and cloud providers. The CLI supports multiple data source types for each telemetry signal (logs, metrics, alerts). The choice of data source type is determined by the cluster's config — the CLI does not assume any mapping between clusters and backends.
 
-### TiDB Cloud observability
+### Data source types
 
-The Loki endpoint URL pattern is:
+**Logs**:
+- `loki` — direct HTTP access to a Loki instance. Query language is LogQL. Supports `--follow` (WebSocket tail).
+- `grafana` — Grafana datasource proxy to a Loki datasource. Query language is LogQL (same as `loki`). Requires `datasource` (Grafana datasource UID), `username`, `password`. `--follow` is not supported.
+- `tke_cls` — Tencent Cloud CLS (Cloud Log Service) via Tencent Cloud API v3. Requires `secret_id`, `secret_key`, `topic_id`, `region`. Query language is CLS syntax (not LogQL). `--follow` is not supported.
 
-```
-https://www.ds.<region>.<provider>.observability.tidbcloud.com/loki/self-monitoring/loki
-```
+**Metrics**:
+- `prometheus` — direct HTTP access to a VictoriaMetrics instance. Query language is MetricsQL/PromQL.
+- `grafana` — Grafana datasource proxy to a Prometheus datasource. Query language is PromQL (same as `prometheus`). Requires `datasource` (Grafana datasource UID), `username`, `password`.
+- `tke_prometheus` — Tencent Cloud TMP Prometheus via `ExportPrometheusReadOnlyDynamicAPI`. Requires `secret_id`, `secret_key`, `instance_id`, `region`. Query language is PromQL.
 
-where `<cloud-region>` is e.g. `ap-southeast-1.aws`, `us-east-1.aws`. The trailing `/loki` is the standard Loki API base path; the CLI appends `/api/v1/...` to it directly.
+**Alerts**:
+- `alertmanager` — direct HTTP access to an Alertmanager instance.
 
-The VictoriaMetrics endpoint URL pattern is:
-
-```
-https://www.ds.<region>.<provider>.observability.tidbcloud.com/internal/metrics/<o11y_id>
-```
-
-where `<o11y_id>` is a per-project observability ID (e.g. `019d3e6c-3e28-7d90-a2f1-2b74e6176cfb`). The CLI appends `/api/v1/...` to it directly. VictoriaMetrics is Prometheus-compatible and accepts MetricsQL (a superset of PromQL) in the `query` parameter.
-
-The Alertmanager endpoint URL pattern is:
-
-```
-https://www.ds.<region>.<provider>.observability.tidbcloud.com/internal/alerts
-```
-
-The CLI appends `/api/v2/...` to it directly. Alertmanager exposes active, silenced, and inhibited alerts with their labels, annotations, and timestamps.
-
-### Tencent Cloud TKE
-
-TKE clusters do not use TiDB Cloud observability. Instead:
-
-- **Logs**: Cloud Log Service (CLS). Accessed via `cls.tencentcloudapi.com` (`SearchLog` API, version `2020-08-10`). Requires `secret_id`, `secret_key`, `topic_id`, and `region`. Time range is in millisecond timestamps. CLS uses its own query syntax (not LogQL).
-- **Metrics**: TMP Prometheus. Accessed via `monitor.tencentcloudapi.com` (`ExportPrometheusReadOnlyDynamicAPI`, version `2018-07-24`). Requires `secret_id`, `secret_key`, `instance_id`, and `region`. The API proxies standard Prometheus API calls; the response is a standard Prometheus JSON envelope wrapped in an `HTTP.ResponseBody` string.
-
-Both use TC3-HMAC-SHA256 signing (Tencent Cloud API v3).
-
-### Jira
-
-Alert tickets are created in Jira Cloud (O11Y project, component drive9) by the alerting system. Unlike logs/metrics/alerts which are per-cluster, Jira is a **global** signal — all clusters' alert tickets land in the same O11Y project and are differentiated by labels and components. The CLI queries Jira via the REST API v3 (`/rest/api/3/search/jql`) using HTTP Basic authentication with an Atlassian account email and an API token. The new cursor-based `/search/jql` endpoint is used (the legacy `/search` endpoint has been deprecated).
+**Jira alerts** (global, not per-cluster):
+- Jira Cloud REST API v3. Requires `jira.endpoint`, `jira.email`, `jira.token` in config.
 
 ## Goals
 
-- Provide a single CLI to query logs from any drive9 cluster without manually constructing Loki API calls.
-- Provide a single CLI to query metrics from any drive9 cluster without manually constructing VictoriaMetrics API calls.
+- Provide a single CLI to query logs from any drive9 cluster without manually constructing backend API calls.
+- Provide a single CLI to query metrics from any drive9 cluster without manually constructing backend API calls.
 - Provide a single CLI to query alerts from any drive9 cluster without manually constructing Alertmanager API calls.
 - Provide a single CLI to query Jira alert tickets without manually constructing Jira API calls.
-- Accept raw LogQL / MetricsQL as the query input so AI/agents can express arbitrarily complex queries without flag-level abstraction leaks.
+- Accept raw LogQL / MetricsQL / PromQL / CLS query strings as the query input so AI/agents can express arbitrarily complex queries without flag-level abstraction leaks.
 - Resolve cluster connection details from a global config file so no endpoint is hardcoded in the binary.
 - Keep the scope narrow: read-only queries. No log ingestion, no alert management, no dashboarding.
 
@@ -87,20 +66,26 @@ alerts.labels = {component = "drive9"}
 | Field                  | Type   | Required | Description                                      |
 |------------------------|--------|----------|--------------------------------------------------|
 | `default_cluster`      | string | no       | Cluster key used when `--cluster` is omitted     |
-| `logs.source_type`     | string | yes      | `loki` or `tke_cls`                              |
-| `logs.endpoint`        | string | for `loki` | Full Loki base URL for this cluster            |
-| `logs.labels`          | map    | no       | Default label selectors appended to every query  |
-| `logs.secret_id`       | string | for `tke_cls` | Tencent Cloud SecretId                     |
+| `logs.source_type`     | string | yes      | `loki`, `grafana`, or `tke_cls`                  |
+| `logs.endpoint`        | string | for `loki`/`grafana` | Full base URL (Loki or Grafana)           |
+| `logs.datasource`      | string | for `grafana` | Grafana datasource UID (Loki)              |
+| `logs.username`        | string | for `grafana` | Grafana Basic Auth username                  |
+| `logs.password`        | string | for `grafana` | Grafana Basic Auth password                  |
+| `logs.secret_id`       | string | for `tke_cls` | Tencent Cloud SecretId                      |
 | `logs.secret_key`      | string | for `tke_cls` | Tencent Cloud SecretKey                    |
-| `logs.topic_id`        | string | for `tke_cls` | CLS topic ID                                |
-| `logs.region`          | string | for `tke_cls` | Tencent Cloud region (e.g. `ap-beijing`)    |
-| `metrics.source_type`  | string | no       | `prometheus` or `tke_prometheus`                |
-| `metrics.endpoint`     | string | for `prometheus` | Full VictoriaMetrics base URL             |
-| `metrics.labels`       | map    | no       | Default label selectors appended to every query  |
+| `logs.topic_id`        | string | for `tke_cls` | CLS topic ID                               |
+| `logs.region`          | string | for `tke_cls` | Tencent Cloud region                       |
+| `logs.labels`          | map    | no       | Default label selectors appended to every query  |
+| `metrics.source_type`  | string | no       | `prometheus`, `grafana`, or `tke_prometheus`    |
+| `metrics.endpoint`     | string | for `prometheus`/`grafana` | Full base URL (VictoriaMetrics or Grafana) |
+| `metrics.datasource`   | string | for `grafana` | Grafana datasource UID                         |
+| `metrics.username`     | string | for `grafana` | Grafana Basic Auth username                     |
+| `metrics.password`     | string | for `grafana` | Grafana Basic Auth password                     |
 | `metrics.secret_id`    | string | for `tke_prometheus` | Tencent Cloud SecretId               |
 | `metrics.secret_key`   | string | for `tke_prometheus` | Tencent Cloud SecretKey              |
 | `metrics.instance_id`  | string | for `tke_prometheus` | Prometheus instance ID               |
 | `metrics.region`       | string | for `tke_prometheus` | Tencent Cloud region (e.g. `ap-beijing`) |
+| `metrics.labels`       | map    | no       | Default label selectors appended to every query  |
 | `alerts.source_type`   | string | no       | `alertmanager`                                   |
 | `alerts.endpoint`      | string | for `alertmanager` | Full Alertmanager base URL                |
 | `alerts.labels`         | map    | no       | Default label selectors appended to every alert query |
@@ -155,6 +140,7 @@ drive9-monitor logs --cluster <key> [flags] <query>
 `<query>` is a positional argument. The query language depends on the cluster's `logs.source_type`:
 
 - **`loki`**: a full LogQL log query (e.g. `{app="foo"} |= "error" | json | line_format "{{.msg}}"`). Passed to the Loki API verbatim.
+- **`grafana`**: a full LogQL log query (same syntax as `loki`), proxied through the Grafana datasource proxy API.
 - **`tke_cls`**: a CLS query string (e.g. `level:error AND tenant_id:abc123`). Passed to the CLS `SearchLog` API verbatim. If omitted, an empty query is used (returns all logs).
 
 Config labels (`logs.labels`) are always applied as filters, regardless of whether a query is provided:
@@ -162,7 +148,7 @@ Config labels (`logs.labels`) are always applied as filters, regardless of wheth
 - **No query**: the stream selector is built entirely from config labels.
 - **Query provided**: config labels are merged into the query. If the user already specifies a label with the same key, the user's value takes precedence.
 
-For `loki`, labels are merged into the `{...}` stream selector (LogQL syntax). For `tke_cls`, labels are appended as `key:value` pairs (CLS query syntax).
+For `loki` and `grafana`, labels are merged into the `{...}` stream selector (LogQL syntax). For `tke_cls`, labels are appended as `key:value` pairs (CLS query syntax).
 
 #### Time semantics
 
@@ -179,7 +165,7 @@ For `loki`, labels are merged into the `{...}` stream selector (LogQL syntax). F
 
 #### `--follow` mode
 
-When `-f` is set, the CLI issues a Loki tail query (`/api/v1/tail`) and streams new log entries to stdout until interrupted. `--limit` and `--direction` are ignored in this mode. `--since`/`--from`/`--to` are also ignored — tail starts from "now" and only delivers new entries, consistent with `kubectl logs -f` behavior. `--follow` is only supported for `loki` source type — `tke_cls` does not support tailing; using `-f` with `tke_cls` returns an error.
+When `-f` is set, the CLI issues a Loki tail query (`/api/v1/tail`) and streams new log entries to stdout until interrupted. `--limit` and `--direction` are ignored in this mode. `--since`/`--from`/`--to` are also ignored — tail starts from "now" and only delivers new entries, consistent with `kubectl logs -f` behavior. `--follow` is only supported for `loki` source type — `grafana` and `tke_cls` do not support tailing; using `-f` with either returns an error.
 
 ### `metrics`
 
@@ -202,7 +188,7 @@ drive9-monitor metrics --cluster <key> [flags] <query>
 | `--output`    | `-o`  | string  | `tui`          | Output format: `tui` \| `table` \| `json`         |
 | `--config`    |       | string  | (default path) | Path to config file                               |
 
-`<query>` is a positional argument containing a full MetricsQL / PromQL expression (e.g. `drive9_service_gauge{component="tenant_pool",name="cached_backends"}` or `rate(http_requests_total[5m])`). The query is passed to the metrics API with no escaping or flag-level filtering abstractions. Both `prometheus` (VictoriaMetrics) and `tke_prometheus` (TMP Prometheus) source types accept the same PromQL/MetricsQL syntax.
+`<query>` is a positional argument containing a full MetricsQL / PromQL expression (e.g. `drive9_service_gauge{component="tenant_pool",name="cached_backends"}` or `rate(http_requests_total[5m])`). The query is passed to the metrics API with no escaping or flag-level filtering abstractions. Both `prometheus` (VictoriaMetrics) and `grafana` (Grafana datasource proxy) source types accept the same PromQL/MetricsQL syntax.
 
 Config labels (`metrics.labels`) are always applied as filters, regardless of whether a query is provided — labels are merged into the query's `{...}` selector, same merge rules as `logs` (see above).
 
@@ -364,9 +350,19 @@ Query construction:
 2. The resulting query is sent to the Loki API as the `query` parameter — no escaping, no additional transformation.
 3. `query_range` calls include `start`, `end`, `limit`, and `direction` parameters derived from the flags (default `backward`).
 
+### Grafana datasource proxy (`source_type = "grafana"`)
+
+The CLI calls the Grafana datasource proxy API with Basic Auth. The `endpoint` is the Grafana base URL, `datasource` is the Loki datasource UID.
+
+- API path: `GET <endpoint>/api/datasources/proxy/uid/<datasource>/loki/api/v1/query_range?query=...&start=...&end=...&limit=...&direction=...`
+- Authentication: HTTP Basic Auth with `username`/`password`.
+- Query syntax and response format are identical to direct Loki access (LogQL, stream entries).
+- Config labels are merged into the query's `{...}` stream selector (same as `loki`).
+- `--follow` is not supported (returns error).
+
 ### TKE CLS (`source_type = "tke_cls"`)
 
-The CLI calls the Tencent Cloud CLS `SearchLog` API via `cls.tencentcloudapi.com` (version `2020-08-10`). Authentication uses TC3-HMAC-SHA256 with `secret_id`/`secret_key`.
+The CLI calls the Tencent Cloud CLS `SearchLog` API via `cls.tencentcloudapi.com` (version `2020-10-16`). Authentication uses TC3-HMAC-SHA256 with `secret_id`/`secret_key`.
 
 - Request body: `{TopicId, From, To, Limit, Query}` where `From`/`To` are millisecond timestamps.
 - Config labels are appended to the query as CLS `key:value` filter pairs.
@@ -375,7 +371,7 @@ The CLI calls the Tencent Cloud CLS `SearchLog` API via `cls.tencentcloudapi.com
 
 ## Metrics API usage
 
-### VictoriaMetrics (`source_type = "prometheus"`)
+### Prometheus/VictoriaMetrics (`source_type = "prometheus"`)
 
 The CLI targets the VictoriaMetrics HTTP API (Prometheus-compatible). The `endpoint` in config is the base URL (including the `/internal/metrics/<o11y_id>` path). API paths are appended directly to the endpoint.
 
@@ -389,6 +385,16 @@ Query construction:
 2. The resulting query is sent to the VictoriaMetrics API as the `query` parameter — no escaping, no additional transformation.
 3. `query_range` calls include `start`, `end`, and `step` parameters derived from the flags.
 4. The query language is MetricsQL (a superset of PromQL). Both PromQL and MetricsQL expressions are accepted by the API without any flag or mode switch.
+
+### Grafana datasource proxy (`source_type = "grafana"`)
+
+The CLI calls the Grafana datasource proxy API with Basic Auth. The `endpoint` is the Grafana base URL, `datasource` is the datasource UID.
+
+- API path: `GET <endpoint>/api/datasources/proxy/uid/<datasource>/api/v1/query_range?query=...&start=...&end=...&step=...`
+- Authentication: HTTP Basic Auth with `username`/`password`.
+- The API proxies to the backend Prometheus instance; query/response format is standard Prometheus.
+- Config labels are merged into the query's `{...}` selector (same as VictoriaMetrics).
+- Response is a standard Prometheus `matrix` JSON — parsed the same way as VictoriaMetrics.
 
 ### TKE Prometheus (`source_type = "tke_prometheus"`)
 

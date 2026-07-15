@@ -46,17 +46,22 @@ pub struct SignalConfig {
     pub endpoint: String,
     #[serde(default)]
     pub labels: BTreeMap<String, String>,
-    // TKE-specific fields (used by tke_cls and tke_prometheus source types).
+    // TKE CLS-specific fields.
     #[serde(default)]
     pub secret_id: Option<String>,
     #[serde(default)]
     pub secret_key: Option<String>,
     #[serde(default)]
-    pub instance_id: Option<String>,
-    #[serde(default)]
     pub topic_id: Option<String>,
     #[serde(default)]
     pub region: Option<String>,
+    // Grafana datasource proxy-specific fields.
+    #[serde(default)]
+    pub datasource: Option<String>,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub password: Option<String>,
 }
 
 impl Config {

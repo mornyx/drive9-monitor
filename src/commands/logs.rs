@@ -64,6 +64,43 @@ pub async fn run(config: &Config, args: LogsArgs) -> Result<()> {
                 .await
             }
         }
+        "grafana" => {
+            if args.follow {
+                anyhow::bail!("--follow is not supported for grafana source type");
+            }
+            let datasource = logs
+                .datasource
+                .as_ref()
+                .context("grafana requires datasource")?;
+            let username = logs
+                .username
+                .as_ref()
+                .context("grafana requires username")?;
+            let password = logs
+                .password
+                .as_ref()
+                .context("grafana requires password")?;
+            let client = crate::grafana::GrafanaClient::new(&logs.endpoint, datasource)?;
+            let query = resolve_query(&args.query, logs);
+            let direction = Direction::parse(&args.direction)?;
+            let (start, end) = resolve_time_range(&args.since, &args.from, &args.to)?;
+            let entries = client
+                .loki_query_range(
+                    &query, start, end, args.limit, direction, username, password,
+                )
+                .await?;
+
+            // Reverse for chronological order (backward returns newest-first).
+            let entries = if direction == Direction::Backward {
+                entries.into_iter().rev().collect::<Vec<_>>()
+            } else {
+                entries
+            };
+            for entry in entries {
+                print_entry(&entry, &output, use_color);
+            }
+            Ok(())
+        }
         "tke_cls" => {
             if args.follow {
                 anyhow::bail!("--follow is not supported for tke_cls source type");
@@ -215,8 +252,16 @@ pub fn merge_labels_into_query(
         i += 1;
     }
 
-    // No stream selector found — prepend one from config labels.
-    format!("{} {}", build_selector(config_labels), query)
+    // No stream selector found — append one after the metric name.
+    // For PromQL: "drive9_metric" -> "drive9_metric{container=\"drive9-server\"}"
+    // For LogQL without {} (rare): the query likely starts with |= or | json,
+    // in which case prepend the selector before the pipeline.
+    let selector = build_selector(config_labels);
+    if query.starts_with('|') {
+        format!("{} {}", selector, query)
+    } else {
+        format!("{}{}", query, selector)
+    }
 }
 
 /// Parse label selectors from inside `{...}`, e.g. `service="foo", app="bar"`.

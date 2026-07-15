@@ -2,6 +2,7 @@ mod alertmanager;
 mod commands;
 mod config;
 mod error;
+mod grafana;
 mod jira;
 mod loki;
 mod tencentcloud;

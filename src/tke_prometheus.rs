@@ -39,6 +39,7 @@ struct SeriesEntry {
     values: Vec<(f64, String)>,
 }
 
+#[allow(dead_code)]
 impl TkePromClient {
     pub fn new(secret_id: &str, secret_key: &str, instance_id: &str, region: &str) -> Result<Self> {
         let tc = TcClient::new(

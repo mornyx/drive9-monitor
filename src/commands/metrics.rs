@@ -42,7 +42,13 @@ impl OutputFormat {
 /// A metrics query executor that abstracts over different backends.
 enum MetricsBackend {
     Vm(VmClient),
+    #[allow(dead_code)]
     TkeProm(crate::tke_prometheus::TkePromClient),
+    Grafana {
+        client: crate::grafana::GrafanaClient,
+        username: String,
+        password: String,
+    },
 }
 
 impl MetricsBackend {
@@ -55,7 +61,17 @@ impl MetricsBackend {
     ) -> Result<Vec<MetricSeries>> {
         match self {
             MetricsBackend::Vm(c) => c.query_range(query, start, end, step).await,
+            #[allow(unused_variables)]
             MetricsBackend::TkeProm(c) => c.query_range(query, start, end, step).await,
+            MetricsBackend::Grafana {
+                client,
+                username,
+                password,
+            } => {
+                client
+                    .query_range(query, start, end, step, username, password)
+                    .await
+            }
         }
     }
 }
@@ -73,29 +89,24 @@ pub async fn run(config: &Config, args: MetricsArgs) -> Result<()> {
 
     let backend = match metrics.source_type.as_str() {
         "prometheus" => MetricsBackend::Vm(VmClient::new(&metrics.endpoint)?),
-        "tke_prometheus" => {
-            let secret_id = metrics
-                .secret_id
+        "grafana" => {
+            let datasource = metrics
+                .datasource
                 .as_ref()
-                .context("tke_prometheus requires secret_id")?;
-            let secret_key = metrics
-                .secret_key
+                .context("grafana requires datasource")?;
+            let username = metrics
+                .username
                 .as_ref()
-                .context("tke_prometheus requires secret_key")?;
-            let instance_id = metrics
-                .instance_id
+                .context("grafana requires username")?;
+            let password = metrics
+                .password
                 .as_ref()
-                .context("tke_prometheus requires instance_id")?;
-            let region = metrics
-                .region
-                .as_ref()
-                .context("tke_prometheus requires region")?;
-            MetricsBackend::TkeProm(crate::tke_prometheus::TkePromClient::new(
-                secret_id,
-                secret_key,
-                instance_id,
-                region,
-            )?)
+                .context("grafana requires password")?;
+            MetricsBackend::Grafana {
+                client: crate::grafana::GrafanaClient::new(&metrics.endpoint, datasource)?,
+                username: username.clone(),
+                password: password.clone(),
+            }
         }
         other => anyhow::bail!("unsupported metrics source_type '{}'", other),
     };
