@@ -19,7 +19,7 @@ pub struct JiraIssue {
     pub project_key: String,
     pub project_name: String,
     pub components: Vec<String>,
-    pub labels: Vec<String>,
+    pub description: String,
 }
 
 /// Jira REST API v3 client.
@@ -64,7 +64,7 @@ struct RawFields {
     #[serde(default)]
     components: Vec<RawNamed>,
     #[serde(default)]
-    labels: Vec<String>,
+    description: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -115,7 +115,7 @@ impl JiraClient {
     /// Uses cursor-based pagination to fetch up to `limit` issues (0 = all).
     pub async fn search(&self, jql: &str, limit: usize) -> Result<Vec<JiraIssue>> {
         let url = format!("{}/rest/api/3/search/jql", self.endpoint);
-        let fields = "summary,status,priority,created,updated,project,components,labels";
+        let fields = "summary,status,priority,created,updated,project,components,description";
         let page_size = 100usize;
 
         let mut all_issues: Vec<JiraIssue> = Vec::new();
@@ -214,6 +214,11 @@ fn parse_issue(raw: &RawIssue) -> Result<JiraIssue> {
         .map(|p| (p.key.clone(), p.name.clone()))
         .unwrap_or_default();
     let components = f.components.iter().map(|c| c.name.clone()).collect();
+    let description = f
+        .description
+        .as_ref()
+        .map(extract_text_from_adf)
+        .unwrap_or_default();
 
     Ok(JiraIssue {
         key: raw.key.clone(),
@@ -226,8 +231,79 @@ fn parse_issue(raw: &RawIssue) -> Result<JiraIssue> {
         project_key,
         project_name,
         components,
-        labels: f.labels.clone(),
+        description,
     })
+}
+
+/// Extract plain text from Atlassian Document Format (ADF) JSON.
+/// Block-level elements (paragraph, heading, panel) are separated by newlines.
+fn extract_text_from_adf(value: &serde_json::Value) -> String {
+    let mut lines = Vec::new();
+    extract_adf_lines(value, &mut lines);
+    lines.join("\n")
+}
+
+fn extract_adf_lines(value: &serde_json::Value, lines: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Object(obj) => {
+            // Block-level types that should start a new line.
+            let block_types = [
+                "paragraph",
+                "heading",
+                "panel",
+                "bulletList",
+                "listItem",
+                "codeBlock",
+                "blockquote",
+            ];
+            let is_block = obj
+                .get("type")
+                .and_then(|v| v.as_str())
+                .is_some_and(|t| block_types.contains(&t));
+
+            if is_block {
+                // Collect inline text within this block, then push as a line.
+                let mut inline = Vec::new();
+                if let Some(content) = obj.get("content") {
+                    collect_inline_text(content, &mut inline);
+                }
+                if !inline.is_empty() {
+                    lines.push(inline.join(""));
+                }
+            } else {
+                // Not a block — recurse into all values.
+                for v in obj.values() {
+                    extract_adf_lines(v, lines);
+                }
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for v in arr {
+                extract_adf_lines(v, lines);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Collect inline text (text nodes) from a content array, preserving spaces.
+fn collect_inline_text(value: &serde_json::Value, texts: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Object(obj) => {
+            if let Some(t) = obj.get("text").and_then(|v| v.as_str()) {
+                texts.push(t.to_string());
+            }
+            for v in obj.values() {
+                collect_inline_text(v, texts);
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for v in arr {
+                collect_inline_text(v, texts);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Parse a Jira timestamp (e.g. `2026-07-14T20:18:19.294+0800`) into Local time.

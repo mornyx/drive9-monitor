@@ -115,10 +115,19 @@ fn print_text(issues: &[JiraIssue], use_color: bool) {
             "{},",
             field("components", &format!("[{}]", issue.components.join(", ")))
         );
-        println!(
-            "{},",
-            field("labels", &format!("[{}]", issue.labels.join(", ")))
-        );
+        // Description is multi-line; indent continuation lines for readability.
+        let desc_lines: Vec<&str> = issue.description.lines().collect();
+        if desc_lines.len() <= 1 {
+            println!("{},", field("description", &issue.description));
+        } else {
+            for (i, line) in desc_lines.iter().enumerate() {
+                if i == 0 {
+                    println!("{},", field("description", line));
+                } else {
+                    println!("      {}", line);
+                }
+            }
+        }
         println!("}}");
     }
 }
@@ -137,7 +146,7 @@ fn print_json(issues: &[JiraIssue]) {
                 "updated": i.updated.to_rfc3339(),
                 "project": {"key": i.project_key, "name": i.project_name},
                 "components": i.components,
-                "labels": i.labels,
+                "description": i.description,
             })
         })
         .collect();

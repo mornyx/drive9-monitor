@@ -289,10 +289,10 @@ Config labels (`jira.labels`) are always applied as base JQL conditions, AND-joi
       updated=...,
       project=...,
       components=[...],
-      labels=[...],
+      description=<plain text extracted from Atlassian Document Format>,
   }
   ```
-  `TIME` is the `created` timestamp in human-friendly format with timezone (e.g. `2026-07-14 20:18:19 +08:00`). `PRIORITY` is from the Jira priority field. `KEY` is the issue key (e.g. `O11Y-2615909`). `STATUS` is the status name. `SUMMARY` is the issue summary. The block also includes `created`, `updated`, `project`, `components` (list of component names), and `labels` (list of label strings). Colorized when stdout is a TTY (priority colored: blocker/重要=red, others=yellow).
+  `TIME` is the `created` timestamp in human-friendly format with timezone (e.g. `2026-07-14 20:18:19 +08:00`). `PRIORITY` is from the Jira priority field. `KEY` is the issue key (e.g. `O11Y-2615909`). `STATUS` is the status name. `SUMMARY` is the issue summary. The block also includes `created`, `updated`, `project`, `components` (list of component names), and `description` (plain text extracted from the Atlassian Document Format description, which contains alert labels including `o11y_region`, `namespace`, `severity`, `alertname`, etc.). Labels are omitted from the block as they are auto-generated hashes with no useful information. Colorized when stdout is a TTY (priority colored: blocker/重要=red, others=yellow).
 - **json**: the raw Jira API v3 JSON response (array of issue objects). No transformation — suitable for AI/agent parsing.
 
 ### `rules`
@@ -443,7 +443,7 @@ Query construction:
 
 Pagination: the `/search/jql` endpoint uses cursor-based pagination. The CLI fetches pages of 100 issues at a time using the `nextPageToken` parameter until `--limit` is reached or `isLast` is true. `--limit 0` fetches all pages.
 
-Response: `issues[]` array, each issue has `key`, `id`, and `fields.{summary, status.{name, statusCategory.{key}}, priority.{name}, created, updated, project.{key, name}, components[].name, labels[]}`.
+Response: `issues[]` array, each issue has `key`, `id`, and `fields.{summary, status.{name, statusCategory.{key}}, priority.{name}, created, updated, project.{key, name}, components[].name, labels[], description}`. The `description` field is in Atlassian Document Format (nested JSON); the CLI extracts plain text from it for the text output format.
 
 ## Rules API usage
 
