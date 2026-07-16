@@ -163,7 +163,7 @@ drive9-monitor metrics [--cluster <key>] [--since <dur>] [--from <ts>] [--to <ts
 
 - **tui** (default): interactive terminal UI rendering a time-series line chart. Auto-refreshes every `--refresh` interval. Each series is a separate line with a legend showing metric name and labels. `q`/`Ctrl-C` exits, `r` forces refresh.
 - **table**: human-readable table — one row per time step, columns for each series.
-- **json**: raw VictoriaMetrics/Prometheus API JSON response. No transformation.
+- **json**: Prometheus-style matrix JSON reconstructed from the API response (`{"status":"success","data":{"resultType":"matrix","result":[...]}}`).
 
 ### `alerts`
 
@@ -199,7 +199,7 @@ drive9-monitor alerts [--cluster <key>] [--state active|silenced|inhibited|all]
   ```
   Includes `startsAt`, `endsAt`, `fingerprint`, all `labels` (alphabetical, excluding `severity`/`alertname` in header), and all `annotations` (alphabetical). Colorized when stdout is a TTY.
 
-- **json**: raw Alertmanager API v2 JSON response.
+- **json**: JSON array of alert objects reconstructed from the Alertmanager API v2 response (`labels`, `annotations`, `startsAt`, `endsAt`, `status.state`, `fingerprint`).
 
 Note: Alertmanager only returns currently active alerts. Resolved alerts disappear automatically. Use `--state all` to include silenced/inhibited alerts.
 
@@ -243,7 +243,7 @@ Config labels (`jira.labels`) are always applied as base JQL conditions (AND-joi
   }
   ```
   `TIME` is the `created` timestamp with timezone. Colorized when stdout is a TTY (priority colored: blocker/重要=red, others=yellow).
-- **json**: structured JSON array with all fields per ticket. No transformation — safe for pipe consumption.
+- **json**: structured JSON array with normalized fields per ticket (`key`, `summary`, `status`, `statusCategory`, `priority`, `created`, `updated`, `project`, `components`, `description`) — safe for pipe consumption.
 
 #### Jira Config
 

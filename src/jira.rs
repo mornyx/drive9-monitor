@@ -1,10 +1,9 @@
-use std::time::Duration;
-
 use anyhow::{Context, Result, bail};
 use base64::Engine;
 use chrono::{DateTime, Local};
-use reqwest::Client;
 use serde::Deserialize;
+
+use crate::http;
 
 /// A single Jira issue from the REST API v3 search endpoint.
 #[derive(Debug, Clone)]
@@ -26,7 +25,7 @@ pub struct JiraIssue {
 pub struct JiraClient {
     endpoint: String,
     auth_header: String,
-    http: Client,
+    http: reqwest::Client,
 }
 
 #[derive(Deserialize)]
@@ -94,10 +93,6 @@ struct RawProject {
 
 impl JiraClient {
     pub fn new(endpoint: &str, email: &str, token: &str) -> Result<Self> {
-        let http = Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .context("failed to build HTTP client")?;
         let credentials = format!("{}:{}", email, token);
         let auth_header = format!(
             "Basic {}",
@@ -106,7 +101,7 @@ impl JiraClient {
         Ok(Self {
             endpoint: endpoint.trim_end_matches('/').to_string(),
             auth_header,
-            http,
+            http: http::build_client()?,
         })
     }
 
@@ -149,11 +144,11 @@ impl JiraClient {
             if status.as_u16() == 401 || status.as_u16() == 403 {
                 bail!(
                     "HTTP {} — Jira authentication failed.\n\
-                     Check `jira_email` and `jira_token` in config — the API token may be expired or revoked.\n\
+                     Check `email` and `token` under `[jira]` in the config file — the API token may be expired or revoked.\n\
                      \n\
                      response body: {}",
                     status.as_u16(),
-                    truncate(&body, 500)
+                    http::truncate(&body, 500)
                 );
             }
 
@@ -162,12 +157,15 @@ impl JiraClient {
                     "HTTP {} — {}\nresponse body: {}",
                     status.as_u16(),
                     status.canonical_reason().unwrap_or("error"),
-                    truncate(&body, 500)
+                    http::truncate(&body, 500)
                 );
             }
 
             let parsed: SearchResponse = serde_json::from_str(&body).with_context(|| {
-                format!("failed to parse Jira response: {}", truncate(&body, 500))
+                format!(
+                    "failed to parse Jira response: {}",
+                    http::truncate(&body, 500)
+                )
             })?;
 
             for raw in parsed.issues {
@@ -316,10 +314,48 @@ fn parse_jira_ts(s: &str) -> Result<DateTime<Local>> {
         .with_context(|| format!("invalid Jira timestamp: {}", s))
 }
 
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max])
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adf_extracts_paragraphs_and_headings() {
+        let adf = serde_json::json!({
+            "type": "doc",
+            "version": 1,
+            "content": [
+                {"type": "heading", "content": [{"type": "text", "text": "Alert Fired"}]},
+                {"type": "paragraph", "content": [
+                    {"type": "text", "text": "severity: "},
+                    {"type": "text", "text": "critical"}
+                ]}
+            ]
+        });
+        assert_eq!(
+            extract_text_from_adf(&adf),
+            "Alert Fired\nseverity: critical"
+        );
+    }
+
+    #[test]
+    fn adf_extracts_list_items() {
+        let adf = serde_json::json!({
+            "type": "doc",
+            "content": [
+                {"type": "bulletList", "content": [
+                    {"type": "listItem", "content": [
+                        {"type": "paragraph", "content": [{"type": "text", "text": "one"}]}
+                    ]}
+                ]}
+            ]
+        });
+        let text = extract_text_from_adf(&adf);
+        assert!(text.contains("one"));
+    }
+
+    #[test]
+    fn adf_empty_doc() {
+        let adf = serde_json::json!({"type": "doc", "content": []});
+        assert_eq!(extract_text_from_adf(&adf), "");
     }
 }

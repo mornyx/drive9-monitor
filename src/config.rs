@@ -39,7 +39,6 @@ pub struct ClusterConfig {
 
 /// A single telemetry signal (logs or metrics) for a cluster.
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 pub struct SignalConfig {
     pub source_type: String,
     #[serde(default)]
@@ -55,6 +54,9 @@ pub struct SignalConfig {
     pub topic_id: Option<String>,
     #[serde(default)]
     pub region: Option<String>,
+    // TKE Prometheus-specific field.
+    #[serde(default)]
+    pub instance_id: Option<String>,
     // Grafana datasource proxy-specific fields.
     #[serde(default)]
     pub datasource: Option<String>,
@@ -109,7 +111,7 @@ impl Config {
         let path = resolve_config_path(opt_path)?;
         if !path.exists() {
             bail!(
-                "config file not found at {}\nCreate it first, then run `set-cluster`.",
+                "config file not found at {}\nCreate it first, then run `clusters use <key>`.",
                 path.display()
             );
         }
@@ -150,6 +152,33 @@ impl ClusterConfig {
             .as_ref()
             .with_context(|| "this cluster has no metrics signal configured".to_string())
     }
+
+    /// Get the alerts signal config, or error if not configured for this cluster.
+    pub fn alerts(&self) -> Result<&SignalConfig> {
+        self.alerts
+            .as_ref()
+            .with_context(|| "this cluster has no alerts signal configured".to_string())
+    }
+}
+
+impl SignalConfig {
+    /// Get the Grafana datasource proxy credentials, or error if incomplete.
+    /// Returns `(datasource_uid, username, password)`.
+    pub fn grafana_auth(&self) -> Result<(&str, &str, &str)> {
+        let datasource = self
+            .datasource
+            .as_deref()
+            .context("grafana requires datasource")?;
+        let username = self
+            .username
+            .as_deref()
+            .context("grafana requires username")?;
+        let password = self
+            .password
+            .as_deref()
+            .context("grafana requires password")?;
+        Ok((datasource, username, password))
+    }
 }
 
 /// Resolve config path: --config flag > env var > default location.
@@ -172,13 +201,50 @@ fn resolve_config_path(opt_path: Option<&str>) -> Result<PathBuf> {
 /// Update or insert the `default_cluster` line in the config TOML content.
 fn set_default_cluster_line(contents: &str, key: &str) -> String {
     let new_line = format!("default_cluster = \"{}\"", key);
-    // Try to replace an existing default_cluster line.
+    // Try to replace an existing default_cluster line. The remainder after the
+    // key must start with `=`, so look-alike keys (`default_cluster_extra`)
+    // and comments are not matched.
     for line in contents.lines() {
         let trimmed = line.trim();
-        if trimmed.starts_with("default_cluster") {
+        if let Some(rest) = trimmed.strip_prefix("default_cluster")
+            && rest.trim_start().starts_with('=')
+        {
             return contents.replacen(line, &new_line, 1);
         }
     }
     // Insert at the top of the file.
     format!("{}\n{}", new_line, contents)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replaces_existing_default_cluster() {
+        let contents = "default_cluster = \"old\"\n\n[clusters.\"a\"]\n";
+        assert_eq!(
+            set_default_cluster_line(contents, "new"),
+            "default_cluster = \"new\"\n\n[clusters.\"a\"]\n"
+        );
+    }
+
+    #[test]
+    fn inserts_when_absent() {
+        let contents = "[clusters.\"a\"]\n";
+        assert_eq!(
+            set_default_cluster_line(contents, "a"),
+            "default_cluster = \"a\"\n[clusters.\"a\"]\n"
+        );
+    }
+
+    #[test]
+    fn ignores_lookalike_keys_and_comments() {
+        let contents = "# default_cluster = \"commented\"\ndefault_cluster_extra = \"x\"\n";
+        // No real default_cluster line — should insert at the top.
+        assert_eq!(
+            set_default_cluster_line(contents, "a"),
+            "default_cluster = \"a\"\n# default_cluster = \"commented\"\ndefault_cluster_extra = \"x\"\n"
+        );
+    }
 }

@@ -3,24 +3,30 @@ mod commands;
 mod config;
 mod error;
 mod grafana;
+mod http;
 mod jira;
+mod labels;
 mod loki;
+mod prom;
 mod tencentcloud;
 mod tke_cls;
 mod tke_prometheus;
 mod victoriametrics;
 
 use std::process::ExitCode;
+use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 
-use crate::commands::alerts::{self, AlertsArgs};
+use crate::commands::alerts::{self, AlertState, AlertsArgs};
 use crate::commands::clusters;
 use crate::commands::jira_alerts::{self, JiraAlertsArgs};
 use crate::commands::logs::{self, LogsArgs};
 use crate::commands::metrics::{self, MetricsArgs};
 use crate::commands::rules;
 use crate::config::Config;
+use crate::loki::Direction;
 
 /// CLI for querying drive9-server monitoring data (logs, metrics, alerts) across clusters.
 #[derive(Parser)]
@@ -51,13 +57,13 @@ enum Command {
         #[arg(short, long)]
         cluster: Option<String>,
 
-        /// Alert state filter: active, silenced, inhibited, or all.
+        /// Alert state filter.
         #[arg(long, default_value = "active")]
-        state: String,
+        state: AlertState,
 
-        /// Output format: text or json.
+        /// Output format.
         #[arg(short, long, default_value = "text")]
-        output: String,
+        output: alerts::OutputFormat,
 
         /// Alertmanager label matcher expression (e.g. {severity="critical"}).
         query: Option<String>,
@@ -73,9 +79,9 @@ enum Command {
         #[arg(short = 'n', long, default_value = "5")]
         limit: usize,
 
-        /// Output format: text or json.
+        /// Output format.
         #[arg(short, long, default_value = "text")]
-        output: String,
+        output: jira_alerts::OutputFormat,
 
         /// Optional JQL expression fragment (e.g. `statusCategory != "Done"`).
         query: Option<String>,
@@ -87,32 +93,32 @@ enum Command {
         cluster: Option<String>,
 
         /// Lookback duration from --to (e.g. 30m, 2h, 1d).
-        #[arg(short, long, default_value = "1h")]
-        since: String,
+        #[arg(short, long, default_value = "1h", value_parser = humantime::parse_duration)]
+        since: Duration,
 
         /// Start time (RFC3339).
-        #[arg(long)]
-        from: Option<String>,
+        #[arg(long, value_parser = commands::common::parse_rfc3339)]
+        from: Option<DateTime<Utc>>,
 
         /// End time (RFC3339, default: now).
-        #[arg(long)]
-        to: Option<String>,
+        #[arg(long, value_parser = commands::common::parse_rfc3339)]
+        to: Option<DateTime<Utc>>,
 
         /// Max number of log lines to return.
         #[arg(short = 'n', long, default_value = "100")]
         limit: u32,
 
-        /// Query direction: forward or backward.
+        /// Query direction.
         #[arg(long, default_value = "backward")]
-        direction: String,
+        direction: Direction,
 
         /// Tail new log entries (stream until Ctrl-C).
         #[arg(short, long)]
         follow: bool,
 
-        /// Output format: text, raw, or json.
+        /// Output format.
         #[arg(short, long, default_value = "text")]
-        output: String,
+        output: logs::OutputFormat,
 
         /// LogQL log query. If omitted, uses default labels from config.
         query: Option<String>,
@@ -124,28 +130,28 @@ enum Command {
         cluster: Option<String>,
 
         /// Lookback duration from --to (e.g. 30m, 2h, 1d).
-        #[arg(short, long, default_value = "1h")]
-        since: String,
+        #[arg(short, long, default_value = "1h", value_parser = humantime::parse_duration)]
+        since: Duration,
 
         /// Start time (RFC3339).
-        #[arg(long)]
-        from: Option<String>,
+        #[arg(long, value_parser = commands::common::parse_rfc3339)]
+        from: Option<DateTime<Utc>>,
 
         /// End time (RFC3339, default: now).
-        #[arg(long)]
-        to: Option<String>,
+        #[arg(long, value_parser = commands::common::parse_rfc3339)]
+        to: Option<DateTime<Utc>>,
 
         /// Query resolution step (e.g. 15s, 1m, 5m).
-        #[arg(long, default_value = "30s")]
-        step: String,
+        #[arg(long, default_value = "30s", value_parser = humantime::parse_duration)]
+        step: Duration,
 
         /// Auto-refresh interval for TUI (e.g. 10s, 30s).
-        #[arg(long, default_value = "10s")]
-        refresh: String,
+        #[arg(long, default_value = "10s", value_parser = humantime::parse_duration)]
+        refresh: Duration,
 
-        /// Output format: tui, table, or json.
+        /// Output format.
         #[arg(short, long, default_value = "tui")]
-        output: String,
+        output: metrics::OutputFormat,
 
         /// MetricsQL / PromQL query expression.
         query: String,

@@ -141,7 +141,7 @@ drive9-monitor logs --cluster <key> [flags] <query>
 
 - **`loki`**: a full LogQL log query (e.g. `{app="foo"} |= "error" | json | line_format "{{.msg}}"`). Passed to the Loki API verbatim.
 - **`grafana`**: a full LogQL log query (same syntax as `loki`), proxied through the Grafana datasource proxy API.
-- **`tke_cls`**: a CLS query string (e.g. `level:error AND tenant_id:abc123`). Passed to the CLS `SearchLog` API verbatim. If omitted, an empty query is used (returns all logs).
+- **`tke_cls`**: a CLS query string (e.g. `level:error AND tenant_id:abc123`). Passed to the CLS `SearchLog` API verbatim. If omitted, an empty query is used (returns all logs). `--direction` is ignored for `tke_cls` — `SearchLog` has no direction parameter and always returns newest-first; the CLI prints entries in chronological order.
 
 Config labels (`logs.labels`) are always applied as filters, regardless of whether a query is provided:
 
@@ -201,7 +201,7 @@ Config labels (`metrics.labels`) are always applied as filters, regardless of wh
 
 - **tui** (default): interactive terminal UI rendering a time-series line chart. The chart auto-refreshes every `--refresh` interval (default 10s). Each series is plotted as a separate line with its label set shown in a legend. Press `q` or `Ctrl-C` to exit.
 - **table**: human-readable table — one row per time step, columns for each series (identified by a compact label representation). Intended for quick scanning in the terminal.
-- **json**: the raw VictoriaMetrics API JSON response, one per query. No transformation — suitable for AI/agent parsing.
+- **json**: a Prometheus-style matrix JSON document reconstructed from the parsed API response (`{"status":"success","data":{"resultType":"matrix","result":[...]}}`), one per query. Suitable for AI/agent parsing.
 
 #### TUI behavior
 
@@ -258,7 +258,7 @@ Config labels (`alerts.labels`) are always applied as filters — same merge rul
   }
   ```
   `TIME` is the `startsAt` timestamp in human-friendly format with timezone (e.g. `2026-07-14 15:30:00 +08:00`), `SEVERITY` is from the `severity` label, `NAME` is from the `alertname` label, `STATE` is the alert state (active/silenced/inhibited). The block includes `startsAt`, `endsAt`, `fingerprint`, all `labels` (in alphabetical order, excluding `severity` and `alertname` which are in the header), and all `annotations` (in alphabetical order). Colorized when stdout is a TTY (severity colored by level: critical/major=red, warning=yellow, info=green).
-- **json**: the raw Alertmanager API v2 JSON response (array of alert objects), one JSON array. No transformation — suitable for AI/agent parsing.
+- **json**: a JSON array of alert objects reconstructed from the Alertmanager API v2 response (`labels`, `annotations`, `startsAt`, `endsAt`, `status.state`, `fingerprint`). Suitable for AI/agent parsing.
 
 ### `jira-alerts`
 
@@ -293,7 +293,7 @@ Config labels (`jira.labels`) are always applied as base JQL conditions, AND-joi
   }
   ```
   `TIME` is the `created` timestamp in human-friendly format with timezone (e.g. `2026-07-14 20:18:19 +08:00`). `PRIORITY` is from the Jira priority field. `KEY` is the issue key (e.g. `O11Y-2615909`). `STATUS` is the status name. `SUMMARY` is the issue summary. The block also includes `created`, `updated`, `project`, `components` (list of component names), and `description` (plain text extracted from the Atlassian Document Format description, which contains alert labels including `o11y_region`, `namespace`, `severity`, `alertname`, etc.). Labels are omitted from the block as they are auto-generated hashes with no useful information. Colorized when stdout is a TTY (priority colored: blocker/重要=red, others=yellow).
-- **json**: the raw Jira API v3 JSON response (array of issue objects). No transformation — suitable for AI/agent parsing.
+- **json**: a JSON array of issue objects with normalized fields (`key`, `summary`, `status`, `statusCategory`, `priority`, `created`, `updated`, `project`, `components`, `description`). Suitable for AI/agent parsing.
 
 ### `rules`
 

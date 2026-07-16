@@ -1,54 +1,63 @@
-use std::io::IsTerminal;
-
-use anyhow::{Context, Result};
+use anyhow::Result;
 use colored::Colorize;
 
 use crate::alertmanager::{Alert, AmClient};
+use crate::commands::common;
 use crate::config::Config;
+use crate::labels::{self, LabelMap, Matcher};
+
+/// Alert state filter for the `alerts` subcommand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum AlertState {
+    Active,
+    Silenced,
+    Inhibited,
+    All,
+}
+
+impl AlertState {
+    /// Map to Alertmanager's `(active, silenced, inhibited)` boolean params.
+    fn as_bools(self) -> (bool, bool, bool) {
+        match self {
+            AlertState::Active => (true, false, false),
+            AlertState::Silenced => (false, true, false),
+            AlertState::Inhibited => (false, false, true),
+            AlertState::All => (true, true, true),
+        }
+    }
+}
+
+/// Output format for alerts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum OutputFormat {
+    Text,
+    Json,
+}
 
 /// Arguments for the `alerts` subcommand.
 pub struct AlertsArgs {
     pub cluster: Option<String>,
     pub query: Option<String>,
-    pub state: String,
-    pub output: String,
+    pub state: AlertState,
+    pub output: OutputFormat,
 }
 
 /// Entry point for the `alerts` subcommand.
 pub async fn run(config: &Config, args: AlertsArgs) -> Result<()> {
     let cluster_key = config.resolve_cluster_key(args.cluster.as_deref())?;
     let cluster = config.cluster(&cluster_key)?;
-    let alerts = cluster
-        .alerts
-        .as_ref()
-        .context("this cluster has no alerts signal configured")?;
+    let alerts = cluster.alerts()?;
 
     let client = AmClient::new(&alerts.endpoint)?;
-    // Alertmanager v2 uses separate filter params per matcher (key="value").
-    // Build filters from user query + config labels.
+    // Alertmanager v2 uses separate filter params per matcher.
     let filters = build_alert_filters(&args.query, &alerts.labels);
-
-    // Determine state filter booleans.
-    let (active, silenced, inhibited) = match args.state.as_str() {
-        "active" => (true, false, false),
-        "silenced" => (false, true, false),
-        "inhibited" => (false, false, true),
-        "all" => (true, true, true),
-        other => anyhow::bail!(
-            "invalid state '{}': expected active, silenced, inhibited, or all",
-            other
-        ),
-    };
+    let (active, silenced, inhibited) = args.state.as_bools();
 
     let alerts = client.alerts(&filters, active, silenced, inhibited).await?;
 
-    match args.output.as_str() {
-        "json" => print_json(&alerts),
-        "text" => {
-            let use_color = std::io::stdout().is_terminal();
-            print_text(&alerts, use_color);
-        }
-        other => anyhow::bail!("invalid output format '{}': expected text or json", other),
+    match args.output {
+        OutputFormat::Json => print_json(&alerts),
+        OutputFormat::Text => print_text(&alerts, common::use_color()),
     }
 
     Ok(())
@@ -56,16 +65,15 @@ pub async fn run(config: &Config, args: AlertsArgs) -> Result<()> {
 
 /// Build Alertmanager v2 filter strings from user query + config labels.
 ///
-/// Each filter is a `key="value"` string (no braces). Alertmanager expects
-/// separate `filter` query params per matcher. Config labels are appended;
-/// user-specified labels take precedence.
-fn build_alert_filters(
-    opt_query: &Option<String>,
-    config_labels: &std::collections::BTreeMap<String, String>,
-) -> Vec<String> {
-    // Parse user query if provided (strip braces if present, parse key="value" pairs).
-    let mut user_labels: std::collections::BTreeMap<String, String> =
-        std::collections::BTreeMap::new();
+/// Each filter is one matcher (`key="value"`, `key=~"regex"`, ...; no braces),
+/// sent as a separate `filter` query param. Config labels are appended;
+/// user-specified matchers take precedence and their operators are preserved.
+fn build_alert_filters(opt_query: &Option<String>, config_labels: &LabelMap) -> Vec<String> {
+    let mut merged: std::collections::BTreeMap<String, Matcher> = config_labels
+        .iter()
+        .map(|(k, v)| (k.clone(), Matcher::eq(k, v)))
+        .collect();
+
     if let Some(q) = opt_query {
         let q = q.trim();
         if !q.is_empty() {
@@ -74,32 +82,13 @@ fn build_alert_filters(
                 .strip_prefix('{')
                 .and_then(|s| s.strip_suffix('}'))
                 .unwrap_or(q);
-            for part in inner.split(',') {
-                let part = part.trim();
-                if let Some(eq_pos) = part.find('=') {
-                    let key = part[..eq_pos].trim().to_string();
-                    let val = part[eq_pos + 1..]
-                        .trim()
-                        .strip_prefix('"')
-                        .and_then(|v| v.strip_suffix('"'))
-                        .unwrap_or(part[eq_pos + 1..].trim())
-                        .to_string();
-                    user_labels.insert(key, val);
-                }
+            for m in labels::parse_matchers(inner) {
+                merged.insert(m.key.clone(), m);
             }
         }
     }
 
-    // Merge: config labels as base, user labels override.
-    let mut merged = config_labels.clone();
-    for (k, v) in &user_labels {
-        merged.insert(k.clone(), v.clone());
-    }
-
-    merged
-        .iter()
-        .map(|(k, v)| format!("{}=\"{}\"", k, v))
-        .collect()
+    merged.values().map(|m| m.to_string()).collect()
 }
 
 fn print_text(alerts: &[Alert], use_color: bool) {
@@ -123,7 +112,7 @@ fn print_text(alerts: &[Alert], use_color: bool) {
             println!(
                 "{} {} {} {} {{",
                 ts.cyan(),
-                colorize_severity(severity),
+                common::colorize_severity(severity),
                 alertname.bold(),
                 alert.state.dimmed(),
             );
@@ -187,11 +176,59 @@ fn print_json(alerts: &[Alert]) {
     println!("{}", serde_json::to_string_pretty(&result).unwrap());
 }
 
-fn colorize_severity(severity: &str) -> colored::ColoredString {
-    match severity {
-        "critical" | "error" | "major" => severity.red(),
-        "warning" | "warn" => severity.yellow(),
-        "info" => severity.green(),
-        _ => severity.normal(),
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn labels(pairs: &[(&str, &str)]) -> LabelMap {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn filters_merge_config_and_query() {
+        let filters = build_alert_filters(
+            &Some(r#"{severity="critical"}"#.to_string()),
+            &labels(&[("component", "drive9")]),
+        );
+        assert_eq!(
+            filters,
+            vec![r#"component="drive9""#, r#"severity="critical""#]
+        );
+    }
+
+    #[test]
+    fn filters_work_without_braces() {
+        let filters = build_alert_filters(
+            &Some(r#"severity="critical""#.to_string()),
+            &LabelMap::new(),
+        );
+        assert_eq!(filters, vec![r#"severity="critical""#]);
+    }
+
+    #[test]
+    fn regex_matchers_are_preserved() {
+        let filters = build_alert_filters(
+            &Some(r#"{pod=~"a|b,c"}"#.to_string()),
+            &labels(&[("component", "drive9")]),
+        );
+        assert_eq!(filters, vec![r#"component="drive9""#, r#"pod=~"a|b,c""#]);
+    }
+
+    #[test]
+    fn user_matchers_override_config() {
+        let filters = build_alert_filters(
+            &Some(r#"{component="custom"}"#.to_string()),
+            &labels(&[("component", "drive9"), ("team", "o11y")]),
+        );
+        assert_eq!(filters, vec![r#"component="custom""#, r#"team="o11y""#]);
+    }
+
+    #[test]
+    fn empty_query_uses_config_only() {
+        let filters = build_alert_filters(&None, &labels(&[("component", "drive9")]));
+        assert_eq!(filters, vec![r#"component="drive9""#]);
     }
 }

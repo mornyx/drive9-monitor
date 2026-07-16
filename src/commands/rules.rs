@@ -1,9 +1,10 @@
 use std::collections::BTreeMap;
-use std::io::IsTerminal;
 
 use anyhow::{Context, Result, bail};
 use colored::Colorize;
 use serde::Deserialize;
+
+use crate::commands::common;
 
 /// Prometheus alerting rules YAML structure.
 #[derive(Deserialize)]
@@ -75,16 +76,20 @@ pub async fn run(name: Option<&str>) -> Result<()> {
 
 /// Fetch the rules YAML from the private GitHub repo via gh CLI.
 async fn fetch_rules() -> Result<String> {
-    let output = tokio::process::Command::new("gh")
-        .args([
-            "api",
-            "repos/tidbcloud/runbooks/contents/rules/mem9/mnemos/drive9-alerts.yaml",
-            "--jq",
-            ".content",
-        ])
-        .output()
-        .await
-        .context("failed to run gh CLI — is it installed?")?;
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        tokio::process::Command::new("gh")
+            .args([
+                "api",
+                "repos/tidbcloud/runbooks/contents/rules/mem9/mnemos/drive9-alerts.yaml",
+                "--jq",
+                ".content",
+            ])
+            .output(),
+    )
+    .await
+    .context("timed out running gh CLI")?
+    .context("failed to run gh CLI — is it installed?")?;
 
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);
@@ -121,11 +126,10 @@ fn print_rule_list(rule: &Rule) {
         .get("summary")
         .map(|s| s.as_str())
         .unwrap_or("");
-    let use_color = std::io::stdout().is_terminal();
-    if use_color {
+    if common::use_color() {
         println!(
             "{} {} — {}",
-            colorize_severity(severity),
+            common::colorize_severity(severity),
             rule.alert.bold(),
             summary
         );
@@ -140,13 +144,13 @@ fn print_rule_detail(rule: &Rule) {
         .get("severity")
         .map(|s| s.as_str())
         .unwrap_or("info");
-    let use_color = std::io::stdout().is_terminal();
+    let use_color = common::use_color();
 
     if use_color {
         println!(
             "{} ({}, {})",
             rule.alert.bold(),
-            colorize_severity(severity),
+            common::colorize_severity(severity),
             rule.for_str()
         );
     } else {
@@ -174,14 +178,5 @@ fn print_rule_detail(rule: &Rule) {
         } else {
             println!("    {}={}", k, v);
         }
-    }
-}
-
-fn colorize_severity(severity: &str) -> colored::ColoredString {
-    match severity {
-        "critical" | "major" => severity.red(),
-        "warning" | "warn" => severity.yellow(),
-        "info" => severity.green(),
-        _ => severity.normal(),
     }
 }

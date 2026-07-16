@@ -1,9 +1,9 @@
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, KeyInit, Mac};
-use reqwest::Client;
-use serde::Deserialize;
 use sha2::{Digest, Sha256};
+
+use crate::http;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -14,15 +14,7 @@ pub struct TcClient {
     service: String,
     host: String,
     region: String,
-    http: Client,
-}
-
-/// Generic Tencent Cloud API response envelope.
-#[derive(Deserialize)]
-#[allow(dead_code, non_snake_case)]
-struct TcResponse {
-    #[serde(default)]
-    Response: serde_json::Value,
+    http: reqwest::Client,
 }
 
 impl TcClient {
@@ -33,17 +25,13 @@ impl TcClient {
         host: &str,
         region: &str,
     ) -> Result<Self> {
-        let http = Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .context("failed to build HTTP client")?;
         Ok(Self {
             secret_id: secret_id.to_string(),
             secret_key: secret_key.to_string(),
             service: service.to_string(),
             host: host.to_string(),
             region: region.to_string(),
-            http,
+            http: http::build_client()?,
         })
     }
 
@@ -124,14 +112,14 @@ impl TcClient {
                 "Tencent Cloud API HTTP {} — {}\nresponse: {}",
                 status.as_u16(),
                 status.canonical_reason().unwrap_or("error"),
-                truncate(&resp_text, 500)
+                http::truncate(&resp_text, 500)
             );
         }
 
         let parsed: serde_json::Value = serde_json::from_str(&resp_text).with_context(|| {
             format!(
                 "failed to parse Tencent Cloud API response: {}",
-                truncate(&resp_text, 500)
+                http::truncate(&resp_text, 500)
             )
         })?;
 
@@ -171,12 +159,4 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
 
 fn hex_encode(data: &[u8]) -> String {
     data.iter().map(|b| format!("{:02x}", b)).collect()
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max])
-    }
 }

@@ -1,54 +1,38 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Utc};
 
+use crate::commands::common;
 use crate::config::Config;
-use crate::victoriametrics::{MetricSeries, VmClient};
-
-/// Arguments for the `metrics` subcommand.
-pub struct MetricsArgs {
-    pub cluster: Option<String>,
-    pub query: String,
-    pub since: String,
-    pub from: Option<String>,
-    pub to: Option<String>,
-    pub step: String,
-    pub refresh: String,
-    pub output: String,
-}
+use crate::prom::MetricSeries;
+use crate::victoriametrics::VmClient;
 
 /// Output format for metrics.
-enum OutputFormat {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum OutputFormat {
     Tui,
     Table,
     Json,
 }
 
-impl OutputFormat {
-    fn parse(s: &str) -> Result<Self> {
-        match s {
-            "tui" => Ok(Self::Tui),
-            "table" => Ok(Self::Table),
-            "json" => Ok(Self::Json),
-            other => anyhow::bail!(
-                "invalid output format '{}': expected tui, table, or json",
-                other
-            ),
-        }
-    }
+/// Arguments for the `metrics` subcommand.
+pub struct MetricsArgs {
+    pub cluster: Option<String>,
+    pub query: String,
+    pub since: Duration,
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
+    pub step: Duration,
+    pub refresh: Duration,
+    pub output: OutputFormat,
 }
 
 /// A metrics query executor that abstracts over different backends.
 enum MetricsBackend {
     Vm(VmClient),
-    #[allow(dead_code)]
     TkeProm(crate::tke_prometheus::TkePromClient),
-    Grafana {
-        client: crate::grafana::GrafanaClient,
-        username: String,
-        password: String,
-    },
+    Grafana(crate::grafana::GrafanaClient),
 }
 
 impl MetricsBackend {
@@ -61,17 +45,8 @@ impl MetricsBackend {
     ) -> Result<Vec<MetricSeries>> {
         match self {
             MetricsBackend::Vm(c) => c.query_range(query, start, end, step).await,
-            #[allow(unused_variables)]
             MetricsBackend::TkeProm(c) => c.query_range(query, start, end, step).await,
-            MetricsBackend::Grafana {
-                client,
-                username,
-                password,
-            } => {
-                client
-                    .query_range(query, start, end, step, username, password)
-                    .await
-            }
+            MetricsBackend::Grafana(c) => c.query_range(query, start, end, step).await,
         }
     }
 }
@@ -82,53 +57,70 @@ pub async fn run(config: &Config, args: MetricsArgs) -> Result<()> {
     let cluster = config.cluster(&cluster_key)?;
     let metrics = cluster.metrics()?;
 
-    let query = super::logs::merge_labels_into_query(&args.query, &metrics.labels);
-    let output = OutputFormat::parse(&args.output)?;
-    let step = humantime::parse_duration(&args.step)
-        .with_context(|| format!("invalid --step duration '{}'", args.step))?;
+    let query = crate::labels::merge_labels_into_query(&args.query, &metrics.labels);
 
     let backend = match metrics.source_type.as_str() {
         "prometheus" => MetricsBackend::Vm(VmClient::new(&metrics.endpoint)?),
         "grafana" => {
-            let datasource = metrics
-                .datasource
-                .as_ref()
-                .context("grafana requires datasource")?;
-            let username = metrics
-                .username
-                .as_ref()
-                .context("grafana requires username")?;
-            let password = metrics
-                .password
-                .as_ref()
-                .context("grafana requires password")?;
-            MetricsBackend::Grafana {
-                client: crate::grafana::GrafanaClient::new(&metrics.endpoint, datasource)?,
-                username: username.clone(),
-                password: password.clone(),
-            }
+            let (datasource, username, password) = metrics.grafana_auth()?;
+            MetricsBackend::Grafana(crate::grafana::GrafanaClient::new(
+                &metrics.endpoint,
+                datasource,
+                username,
+                password,
+            )?)
+        }
+        "tke_prometheus" => {
+            let secret_id = metrics
+                .secret_id
+                .as_deref()
+                .context("tke_prometheus requires secret_id")?;
+            let secret_key = metrics
+                .secret_key
+                .as_deref()
+                .context("tke_prometheus requires secret_key")?;
+            let instance_id = metrics
+                .instance_id
+                .as_deref()
+                .context("tke_prometheus requires instance_id")?;
+            let region = metrics
+                .region
+                .as_deref()
+                .context("tke_prometheus requires region")?;
+            MetricsBackend::TkeProm(crate::tke_prometheus::TkePromClient::new(
+                secret_id,
+                secret_key,
+                instance_id,
+                region,
+            )?)
         }
         other => anyhow::bail!("unsupported metrics source_type '{}'", other),
     };
 
-    match output {
+    match args.output {
         OutputFormat::Json => {
-            let (start, end) = resolve_time_range(&args.since, &args.from, &args.to)?;
-            let series = backend.query_range(&query, start, end, step).await?;
+            let (start, end) = common::resolve_time_range(args.since, args.from, args.to);
+            let series = backend.query_range(&query, start, end, args.step).await?;
             print_json(&series);
             Ok(())
         }
         OutputFormat::Table => {
-            let (start, end) = resolve_time_range(&args.since, &args.from, &args.to)?;
-            let series = backend.query_range(&query, start, end, step).await?;
+            let (start, end) = common::resolve_time_range(args.since, args.from, args.to);
+            let series = backend.query_range(&query, start, end, args.step).await?;
             print_table(&series);
             Ok(())
         }
-        OutputFormat::Tui => {
-            let refresh = humantime::parse_duration(&args.refresh)
-                .with_context(|| format!("invalid --refresh duration '{}'", args.refresh))?;
-            run_tui(backend, &cluster_key, &args, &query, step, refresh).await
-        }
+        OutputFormat::Tui => run_tui(backend, &cluster_key, &args, &query).await,
+    }
+}
+
+/// Restore the terminal (raw mode + alternate screen) on any exit path.
+struct TermGuard;
+
+impl Drop for TermGuard {
+    fn drop(&mut self) {
+        let _ = crossterm::terminal::disable_raw_mode();
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen);
     }
 }
 
@@ -138,15 +130,10 @@ async fn run_tui(
     cluster_key: &str,
     args: &MetricsArgs,
     query: &str,
-    step: Duration,
-    refresh: Duration,
 ) -> Result<()> {
-    use crossterm::event::EventStream;
-    use crossterm::event::{Event, KeyCode, KeyEventKind};
+    use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
     use crossterm::execute;
-    use crossterm::terminal::{
-        EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
-    };
+    use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
     use futures_util::StreamExt;
     use ratatui::Terminal;
     use ratatui::backend::CrosstermBackend;
@@ -155,19 +142,23 @@ async fn run_tui(
     enable_raw_mode().context("failed to enable raw mode")?;
     let mut stdout = stdout();
     execute!(stdout, EnterAlternateScreen).context("failed to enter alternate screen")?;
+    // From here on, the guard restores the terminal on any exit path
+    // (break, error, or panic unwinding).
+    let _guard = TermGuard;
     let term_backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(term_backend).context("failed to create terminal")?;
 
     let mut last_series: Vec<MetricSeries> = Vec::new();
     let mut last_error: Option<String> = None;
     let mut next_refresh = tokio::time::Instant::now();
+    let mut event_stream = EventStream::new();
 
     loop {
         // Check if it's time to refresh.
         let now = tokio::time::Instant::now();
         if now >= next_refresh {
-            let (start, end) = resolve_time_range(&args.since, &args.from, &args.to)?;
-            match backend.query_range(query, start, end, step).await {
+            let (start, end) = common::resolve_time_range(args.since, args.from, args.to);
+            match backend.query_range(query, start, end, args.step).await {
                 Ok(s) => {
                     last_series = s;
                     last_error = None;
@@ -176,7 +167,7 @@ async fn run_tui(
                     last_error = Some(e.to_string());
                 }
             }
-            next_refresh = now + refresh;
+            next_refresh = now + args.refresh;
         }
 
         // Render.
@@ -185,7 +176,7 @@ async fn run_tui(
                 f,
                 query,
                 cluster_key,
-                refresh,
+                args.refresh,
                 next_refresh,
                 &last_series,
                 last_error.as_deref(),
@@ -194,34 +185,33 @@ async fn run_tui(
 
         // Wait for either a key event or the next refresh time.
         let wait = next_refresh.saturating_duration_since(tokio::time::Instant::now());
-        let mut event_stream = EventStream::new();
         tokio::select! {
             _ = tokio::time::sleep(wait) => {}
             maybe_event = event_stream.next() => {
                 if let Some(Ok(Event::Key(key))) = maybe_event
-                    && key.kind == KeyEventKind::Press {
-                        match key.code {
-                            KeyCode::Char('q') | KeyCode::Char('Q') => break,
-                            KeyCode::Char('r') | KeyCode::Char('R') => {
-                                next_refresh = tokio::time::Instant::now();
-                            }
-                            _ => {}
+                    && key.kind == KeyEventKind::Press
+                {
+                    match key.code {
+                        KeyCode::Char('q') | KeyCode::Char('Q') => break,
+                        // In raw mode Ctrl-C arrives as a key event, not SIGINT.
+                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            break;
                         }
+                        KeyCode::Char('r') | KeyCode::Char('R') => {
+                            next_refresh = tokio::time::Instant::now();
+                        }
+                        _ => {}
                     }
+                }
             }
         }
     }
 
-    disable_raw_mode().context("failed to disable raw mode")?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)
-        .context("failed to leave alternate screen")?;
     terminal.show_cursor().context("failed to show cursor")?;
-
     Ok(())
 }
 
 /// Draw the TUI.
-#[allow(clippy::too_many_arguments)]
 fn draw_tui(
     frame: &mut ratatui::Frame,
     query: &str,
@@ -264,7 +254,7 @@ fn draw_tui(
             .block(chart_block);
         frame.render_widget(para, chunks[0]);
     } else {
-        // Build datasets.
+        // Build datasets (NaN points are dropped so they don't distort the plot).
         let colors = [
             Color::Cyan,
             Color::Green,
@@ -278,6 +268,7 @@ fn draw_tui(
             .map(|s| {
                 s.points
                     .iter()
+                    .filter(|(_, v)| v.is_finite())
                     .map(|(dt, v)| (dt.timestamp() as f64, *v))
                     .collect()
             })
@@ -288,7 +279,7 @@ fn draw_tui(
             .enumerate()
             .map(|(i, data)| {
                 Dataset::default()
-                    .name(format_series_label(&series[i].metric))
+                    .name(crate::labels::build_selector(&series[i].metric))
                     .marker(ratatui::symbols::Marker::Braille)
                     .graph_type(ratatui::widgets::GraphType::Line)
                     .style(Style::default().fg(colors[i % colors.len()]))
@@ -305,14 +296,20 @@ fn draw_tui(
                 (mn.min(x), mx.max(x))
             });
 
-        // Determine Y axis range.
+        // Determine Y axis range (ignore NaN so bounds stay finite).
         let (y_min, y_max) = series
             .iter()
             .flat_map(|s| s.points.iter())
             .map(|(_, v)| *v)
+            .filter(|v| v.is_finite())
             .fold((f64::INFINITY, f64::NEG_INFINITY), |(mn, mx), y| {
                 (mn.min(y), mx.max(y))
             });
+        let (y_min, y_max) = if y_min <= y_max {
+            (y_min, y_max)
+        } else {
+            (0.0, 1.0) // all values were NaN — fall back to a dummy range
+        };
 
         let chart = Chart::new(datasets)
             .block(chart_block)
@@ -388,7 +385,7 @@ fn draw_tui(
     let secs_until = next_refresh.saturating_duration_since(now).as_secs();
     let bottom = Line::from(vec![
         Span::styled(
-            " q:quit  r:refresh  ".to_string(),
+            " q/^C:quit  r:refresh  ".to_string(),
             Style::default().add_modifier(Modifier::BOLD),
         ),
         Span::raw(format!("refresh={}s  ", refresh.as_secs())),
@@ -410,19 +407,7 @@ fn format_time_label(ts: f64) -> String {
     .unwrap_or_else(|| format!("{}", ts))
 }
 
-/// Format a series label set compactly: `{key="val", ...}`.
-fn format_series_label(metric: &std::collections::BTreeMap<String, String>) -> String {
-    if metric.is_empty() {
-        return "{}".to_string();
-    }
-    let parts: Vec<String> = metric
-        .iter()
-        .map(|(k, v)| format!("{}=\"{}\"", k, v))
-        .collect();
-    format!("{{{}}}", parts.join(", "))
-}
-
-/// Print metrics as JSON (raw API response-like).
+/// Print metrics as JSON (Prometheus-style matrix document).
 fn print_json(series: &[MetricSeries]) {
     let result: Vec<serde_json::Value> = series
         .iter()
@@ -466,7 +451,7 @@ fn print_table(series: &[MetricSeries]) {
     // Header.
     let mut header = format!("{:<20}", "TIME");
     for s in series.iter() {
-        let label = format_series_label(&s.metric);
+        let label = crate::labels::build_selector(&s.metric);
         let label = if label.len() > 30 {
             format!("{}...", &label[..27])
         } else {
@@ -492,33 +477,4 @@ fn print_table(series: &[MetricSeries]) {
         }
         println!("{}", row);
     }
-}
-
-/// Resolve the time range from --since/--from/--to flags.
-fn resolve_time_range(
-    since: &str,
-    from: &Option<String>,
-    to: &Option<String>,
-) -> Result<(DateTime<Utc>, DateTime<Utc>)> {
-    let end = match to {
-        Some(t) => parse_rfc3339(t)?,
-        None => Utc::now(),
-    };
-
-    let start = match from {
-        Some(f) => parse_rfc3339(f)?,
-        None => {
-            let dur = humantime::parse_duration(since)
-                .with_context(|| format!("invalid --since duration '{}'", since))?;
-            end - ChronoDuration::from_std(dur)?
-        }
-    };
-
-    Ok((start, end))
-}
-
-fn parse_rfc3339(s: &str) -> Result<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(s)
-        .map(|dt| dt.with_timezone(&Utc))
-        .with_context(|| format!("invalid timestamp '{}': expected RFC3339 format", s))
 }

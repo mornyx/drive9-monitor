@@ -1,16 +1,23 @@
-use std::io::IsTerminal;
-
 use anyhow::{Context, Result, bail};
 use colored::Colorize;
 
+use crate::commands::common;
 use crate::config::Config;
 use crate::jira::{JiraClient, JiraIssue};
+use crate::labels::LabelMap;
+
+/// Output format for jira-alerts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum OutputFormat {
+    Text,
+    Json,
+}
 
 /// Arguments for the `jira-alerts` subcommand.
 pub struct JiraAlertsArgs {
     pub query: Option<String>,
     pub limit: usize,
-    pub output: String,
+    pub output: OutputFormat,
 }
 
 /// Entry point for the `jira-alerts` subcommand.
@@ -25,13 +32,9 @@ pub async fn run(config: &Config, args: JiraAlertsArgs) -> Result<()> {
     let jql = build_jql(&args.query, &jira.labels)?;
     let issues = client.search(&jql, args.limit).await?;
 
-    match args.output.as_str() {
-        "json" => print_json(&issues),
-        "text" => {
-            let use_color = std::io::stdout().is_terminal();
-            print_text(&issues, use_color);
-        }
-        other => anyhow::bail!("invalid output format '{}': expected text or json", other),
+    match args.output {
+        OutputFormat::Json => print_json(&issues),
+        OutputFormat::Text => print_text(&issues, common::use_color()),
     }
 
     Ok(())
@@ -45,10 +48,7 @@ pub async fn run(config: &Config, args: JiraAlertsArgs) -> Result<()> {
 ///
 /// Jira's `/search/jql` endpoint rejects unrestricted queries (no WHERE clause),
 /// so at least one condition is required.
-fn build_jql(
-    opt_query: &Option<String>,
-    config_labels: &std::collections::BTreeMap<String, String>,
-) -> Result<String> {
+fn build_jql(opt_query: &Option<String>, config_labels: &LabelMap) -> Result<String> {
     let mut conditions: Vec<String> = config_labels
         .iter()
         .map(|(k, v)| format!("{} = \"{}\"", k, v))
@@ -64,7 +64,7 @@ fn build_jql(
     if conditions.is_empty() {
         bail!(
             "Jira requires at least one filter condition.\n\
-             Set `jira_labels` in config (e.g. `jira_labels = {{component = \"drive9\"}}`)\n\
+             Set `labels` under `[jira]` in config (e.g. `labels = {{component = \"drive9\"}}`)\n\
              or provide a JQL query as a positional argument (e.g. `drive9-monitor jira-alerts 'component = \"drive9\"'`)."
         );
     }
@@ -158,5 +158,42 @@ fn colorize_priority(priority: &str) -> colored::ColoredString {
         "blocker" | "critical" | "严重" | "最高" | "Highest" | "P0" => priority.red(),
         "major" | "重要" | "高" | "High" | "P1" => priority.yellow(),
         _ => priority.normal(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn labels(pairs: &[(&str, &str)]) -> LabelMap {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn jql_from_labels_only() {
+        let jql = build_jql(&None, &labels(&[("component", "drive9")])).unwrap();
+        assert_eq!(jql, r#"component = "drive9" ORDER BY created DESC"#);
+    }
+
+    #[test]
+    fn jql_ands_user_query() {
+        let jql = build_jql(
+            &Some(r#"statusCategory != "Done""#.to_string()),
+            &labels(&[("component", "drive9")]),
+        )
+        .unwrap();
+        assert_eq!(
+            jql,
+            r#"component = "drive9" AND statusCategory != "Done" ORDER BY created DESC"#
+        );
+    }
+
+    #[test]
+    fn jql_errors_without_any_condition() {
+        assert!(build_jql(&None, &LabelMap::new()).is_err());
+        assert!(build_jql(&Some("  ".to_string()), &LabelMap::new()).is_err());
     }
 }

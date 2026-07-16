@@ -73,7 +73,7 @@ impl TkeClsClient {
                 log_info.Time / 1000,
                 ((log_info.Time % 1000) * 1_000_000) as u32,
             )
-            .unwrap_or_else(Utc::now);
+            .with_context(|| format!("invalid CLS log timestamp: {}", log_info.Time))?;
             entries.push(LogEntry {
                 ts,
                 labels: BTreeMap::new(),

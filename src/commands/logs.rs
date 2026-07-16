@@ -1,44 +1,31 @@
-use std::io::IsTerminal;
-
 use anyhow::{Context, Result};
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use colored::Colorize;
 
-use crate::config::Config;
+use crate::commands::common;
+use crate::config::{Config, SignalConfig};
+use crate::labels::{self, LabelMap};
 use crate::loki::{Direction, LogEntry, LokiClient};
 
 /// Output format for log entries.
-enum OutputFormat {
-    Json,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum OutputFormat {
     Text,
     Raw,
-}
-
-impl OutputFormat {
-    fn parse(s: &str) -> Result<Self> {
-        match s {
-            "raw" => Ok(Self::Raw),
-            "json" => Ok(Self::Json),
-            "text" => Ok(Self::Text),
-            other => anyhow::bail!(
-                "invalid output format '{}': expected raw, json, or text",
-                other
-            ),
-        }
-    }
+    Json,
 }
 
 /// Arguments for the `logs` subcommand.
 pub struct LogsArgs {
     pub cluster: Option<String>,
     pub query: Option<String>,
-    pub since: String,
-    pub from: Option<String>,
-    pub to: Option<String>,
+    pub since: std::time::Duration,
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
     pub limit: u32,
-    pub direction: String,
+    pub direction: Direction,
     pub follow: bool,
-    pub output: String,
+    pub output: OutputFormat,
 }
 
 /// Entry point for the `logs` subcommand.
@@ -46,59 +33,38 @@ pub async fn run(config: &Config, args: LogsArgs) -> Result<()> {
     let cluster_key = config.resolve_cluster_key(args.cluster.as_deref())?;
     let cluster = config.cluster(&cluster_key)?;
     let logs = cluster.logs()?;
-    let output = OutputFormat::parse(&args.output)?;
-    let use_color = std::io::stdout().is_terminal();
+    let use_color = common::use_color();
 
     match logs.source_type.as_str() {
         "loki" => {
             let client = LokiClient::new(&logs.endpoint)?;
             let query = resolve_query(&args.query, logs);
             if args.follow {
-                run_tail(&client, &query, &output, use_color).await
+                client
+                    .tail(&query, |entry| print_entry(&entry, args.output, use_color))
+                    .await
             } else {
-                let direction = Direction::parse(&args.direction)?;
-                let (start, end) = resolve_time_range(&args.since, &args.from, &args.to)?;
-                run_query_range(
-                    &client, &query, start, end, args.limit, direction, &output, use_color,
-                )
-                .await
+                let (start, end) = common::resolve_time_range(args.since, args.from, args.to);
+                let entries = client
+                    .query_range(&query, start, end, args.limit, args.direction)
+                    .await?;
+                print_entries(entries, args.direction, args.output, use_color);
+                Ok(())
             }
         }
         "grafana" => {
             if args.follow {
                 anyhow::bail!("--follow is not supported for grafana source type");
             }
-            let datasource = logs
-                .datasource
-                .as_ref()
-                .context("grafana requires datasource")?;
-            let username = logs
-                .username
-                .as_ref()
-                .context("grafana requires username")?;
-            let password = logs
-                .password
-                .as_ref()
-                .context("grafana requires password")?;
-            let client = crate::grafana::GrafanaClient::new(&logs.endpoint, datasource)?;
+            let (datasource, username, password) = logs.grafana_auth()?;
+            let client =
+                crate::grafana::GrafanaClient::new(&logs.endpoint, datasource, username, password)?;
             let query = resolve_query(&args.query, logs);
-            let direction = Direction::parse(&args.direction)?;
-            let (start, end) = resolve_time_range(&args.since, &args.from, &args.to)?;
+            let (start, end) = common::resolve_time_range(args.since, args.from, args.to);
             let entries = client
-                .loki_query_range(
-                    &query, start, end, args.limit, direction, username, password,
-                )
+                .loki_query_range(&query, start, end, args.limit, args.direction)
                 .await?;
-
-            // Reverse for chronological order (backward returns newest-first).
-            let entries = if direction == Direction::Backward {
-                entries.into_iter().rev().collect::<Vec<_>>()
-            } else {
-                entries
-            };
-            for entry in entries {
-                print_entry(&entry, &output, use_color);
-            }
+            print_entries(entries, args.direction, args.output, use_color);
             Ok(())
         }
         "tke_cls" => {
@@ -107,35 +73,56 @@ pub async fn run(config: &Config, args: LogsArgs) -> Result<()> {
             }
             let secret_id = logs
                 .secret_id
-                .as_ref()
+                .as_deref()
                 .context("tke_cls requires secret_id")?;
             let secret_key = logs
                 .secret_key
-                .as_ref()
+                .as_deref()
                 .context("tke_cls requires secret_key")?;
             let topic_id = logs
                 .topic_id
-                .as_ref()
+                .as_deref()
                 .context("tke_cls requires topic_id")?;
-            let region = logs.region.as_ref().context("tke_cls requires region")?;
+            let region = logs.region.as_deref().context("tke_cls requires region")?;
             let client =
                 crate::tke_cls::TkeClsClient::new(secret_id, secret_key, topic_id, region)?;
 
             let query = resolve_cls_query(&args.query, &logs.labels);
-            let (start, end) = resolve_time_range(&args.since, &args.from, &args.to)?;
-            let from_ms = start.timestamp_millis();
-            let to_ms = end.timestamp_millis();
+            let (start, end) = common::resolve_time_range(args.since, args.from, args.to);
             let entries = client
-                .search_log(from_ms, to_ms, args.limit, &query)
+                .search_log(
+                    start.timestamp_millis(),
+                    end.timestamp_millis(),
+                    args.limit,
+                    &query,
+                )
                 .await?;
 
-            // CLS returns newest-first by default. Reverse for chronological order.
-            for entry in entries.into_iter().rev() {
-                print_entry(&entry, &output, use_color);
+            // CLS SearchLog always returns newest-first and has no direction
+            // parameter; print in chronological order regardless of --direction.
+            for entry in entries.iter().rev() {
+                print_entry(entry, args.output, use_color);
             }
             Ok(())
         }
         other => anyhow::bail!("unsupported logs source_type '{}'", other),
+    }
+}
+
+/// Print entries in chronological order (backward queries come back newest-first).
+fn print_entries(
+    entries: Vec<LogEntry>,
+    direction: Direction,
+    output: OutputFormat,
+    use_color: bool,
+) {
+    let ordered: Vec<LogEntry> = if direction == Direction::Backward {
+        entries.into_iter().rev().collect()
+    } else {
+        entries
+    };
+    for entry in &ordered {
+        print_entry(entry, output, use_color);
     }
 }
 
@@ -146,12 +133,11 @@ pub async fn run(config: &Config, args: LogsArgs) -> Result<()> {
 /// provides a query, config labels are merged into the query's stream
 /// selector — user-specified labels take precedence over config labels
 /// for the same key.
-fn resolve_query(opt_query: &Option<String>, signal: &crate::config::SignalConfig) -> String {
-    let user_query = match opt_query {
-        Some(q) => q.clone(),
-        None => return build_selector(&signal.labels),
-    };
-    merge_labels_into_query(&user_query, &signal.labels)
+fn resolve_query(opt_query: &Option<String>, signal: &SignalConfig) -> String {
+    match opt_query {
+        Some(q) => labels::merge_labels_into_query(q, &signal.labels),
+        None => labels::build_selector(&signal.labels),
+    }
 }
 
 /// Build the final CLS query string.
@@ -159,10 +145,7 @@ fn resolve_query(opt_query: &Option<String>, signal: &crate::config::SignalConfi
 /// Config labels are appended as `key:value` pairs. If the user provides
 /// a query, it is prepended and config labels are appended with ` AND `.
 /// If no query, only the label filters are used.
-fn resolve_cls_query(
-    opt_query: &Option<String>,
-    config_labels: &std::collections::BTreeMap<String, String>,
-) -> String {
+fn resolve_cls_query(opt_query: &Option<String>, config_labels: &LabelMap) -> String {
     let label_filters: Vec<String> = config_labels
         .iter()
         .map(|(k, v)| format!("{}:{}", k, v))
@@ -181,215 +164,13 @@ fn resolve_cls_query(
     }
 }
 
-/// Build a LogQL stream selector from a label map: `{key="val", ...}`.
-fn build_selector(labels: &std::collections::BTreeMap<String, String>) -> String {
-    if labels.is_empty() {
-        return "{}".to_string();
-    }
-    let parts: Vec<String> = labels
-        .iter()
-        .map(|(k, v)| format!("{}=\"{}\"", k, v))
-        .collect();
-    format!("{{{}}}", parts.join(", "))
-}
-
-/// Merge config labels into a user-provided LogQL query.
-///
-/// The user's stream selector (the first `{...}` in the query) is parsed
-/// for existing label selectors. Config labels are added for any key not
-/// already present — user-specified labels take precedence. If the query
-/// has no stream selector, one is prepended from config labels.
-pub fn merge_labels_into_query(
-    query: &str,
-    config_labels: &std::collections::BTreeMap<String, String>,
-) -> String {
-    if config_labels.is_empty() {
-        return query.to_string();
-    }
-
-    // Find the first stream selector `{...}` in the query.
-    // LogQL requires balanced braces and quoted strings inside, so we
-    // scan for the opening brace and track quote state to find the match.
-    let bytes = query.as_bytes();
-    let mut start = None;
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'{' && start.is_none() {
-            start = Some(i);
-        }
-        if let Some(s) = start {
-            // Scan forward respecting string literals.
-            let mut j = s + 1;
-            let mut in_str = false;
-            while j < bytes.len() {
-                let c = bytes[j];
-                if in_str {
-                    if c == b'\\' {
-                        j += 2;
-                        continue;
-                    }
-                    if c == b'"' {
-                        in_str = false;
-                    }
-                } else {
-                    if c == b'"' {
-                        in_str = true;
-                    } else if c == b'}' {
-                        // Found the closing brace.
-                        let selector_str = &query[s + 1..j];
-                        let user_labels = parse_selector_labels(selector_str);
-                        let merged = merge_label_maps(config_labels, &user_labels);
-                        let new_selector = build_selector(&merged);
-                        let prefix = &query[..s];
-                        let rest = &query[j + 1..];
-                        return format!("{}{}{}", prefix, new_selector, rest);
-                    }
-                }
-                j += 1;
-            }
-            break; // Unbalanced brace — leave query as-is.
-        }
-        i += 1;
-    }
-
-    // No stream selector found — append one after the metric name.
-    // For PromQL: "drive9_metric" -> "drive9_metric{container=\"drive9-server\"}"
-    // For LogQL without {} (rare): the query likely starts with |= or | json,
-    // in which case prepend the selector before the pipeline.
-    let selector = build_selector(config_labels);
-    if query.starts_with('|') {
-        format!("{} {}", selector, query)
-    } else {
-        format!("{}{}", query, selector)
-    }
-}
-
-/// Parse label selectors from inside `{...}`, e.g. `service="foo", app="bar"`.
-fn parse_selector_labels(s: &str) -> std::collections::BTreeMap<String, String> {
-    let mut labels = std::collections::BTreeMap::new();
-    for part in s.split(',') {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
-        }
-        // Format: key="value" or key=~"regex" or key!="value" etc.
-        // Find the operator: =, !=, =~, !~
-        if let Some(eq_pos) = part.find('=') {
-            let key = part[..eq_pos]
-                .trim()
-                .trim_end_matches('!')
-                .trim_end_matches('~')
-                .trim()
-                .to_string();
-            let val_part = part[eq_pos + 1..].trim();
-            // Strip surrounding quotes.
-            let val = val_part
-                .strip_prefix('"')
-                .and_then(|v| v.strip_suffix('"'))
-                .unwrap_or(val_part)
-                .to_string();
-            labels.insert(key, val);
-        }
-    }
-    labels
-}
-
-/// Merge two label maps: config labels as base, user labels override.
-fn merge_label_maps(
-    config: &std::collections::BTreeMap<String, String>,
-    user: &std::collections::BTreeMap<String, String>,
-) -> std::collections::BTreeMap<String, String> {
-    let mut merged = config.clone();
-    for (k, v) in user {
-        merged.insert(k.clone(), v.clone());
-    }
-    merged
-}
-
-/// Resolve the time range from --since/--from/--to flags.
-fn resolve_time_range(
-    since: &str,
-    from: &Option<String>,
-    to: &Option<String>,
-) -> Result<(DateTime<Utc>, DateTime<Utc>)> {
-    let end = match to {
-        Some(t) => parse_rfc3339(t)?,
-        None => Utc::now(),
-    };
-
-    let start = match from {
-        Some(f) => parse_rfc3339(f)?,
-        None => {
-            let dur = humantime::parse_duration(since).with_context(|| {
-                format!(
-                    "invalid --since duration '{}': expected e.g. 30m, 2h, 1d",
-                    since
-                )
-            })?;
-            end - Duration::from_std(dur)?
-        }
-    };
-
-    Ok((start, end))
-}
-
-fn parse_rfc3339(s: &str) -> Result<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(s)
-        .map(|dt| dt.with_timezone(&Utc))
-        .with_context(|| format!("invalid timestamp '{}': expected RFC3339 format", s))
-}
-
-/// Execute a query_range request and print results.
-#[allow(clippy::too_many_arguments)]
-async fn run_query_range(
-    client: &LokiClient,
-    query: &str,
-    start: DateTime<Utc>,
-    end: DateTime<Utc>,
-    limit: u32,
-    direction: Direction,
-    output: &OutputFormat,
-    use_color: bool,
-) -> Result<()> {
-    let entries = client
-        .query_range(query, start, end, limit, direction)
-        .await?;
-
-    // Loki returns entries in query direction order. For backward (default),
-    // entries are newest-first. For display, reverse to chronological order.
-    let entries = if direction == Direction::Backward {
-        entries.into_iter().rev().collect::<Vec<_>>()
-    } else {
-        entries
-    };
-
-    for entry in entries {
-        print_entry(&entry, output, use_color);
-    }
-    Ok(())
-}
-
-/// Tail logs via WebSocket and print entries as they arrive.
-async fn run_tail(
-    client: &LokiClient,
-    query: &str,
-    output: &OutputFormat,
-    use_color: bool,
-) -> Result<()> {
-    client
-        .tail(query, |entry| {
-            print_entry(&entry, output, use_color);
-        })
-        .await
-}
-
 /// Print a single log entry in the selected format.
-fn print_entry(entry: &LogEntry, output: &OutputFormat, use_color: bool) {
+fn print_entry(entry: &LogEntry, output: OutputFormat, use_color: bool) {
     match output {
         OutputFormat::Raw => {
             // <timestamp> <stream labels> <raw log line>
             let ts = entry.ts.to_rfc3339();
-            let labels_str = format_labels(&entry.labels);
+            let labels_str = labels::build_selector(&entry.labels);
             if use_color {
                 println!("{} {} {}", ts.cyan(), labels_str.dimmed(), entry.line);
             } else {
@@ -463,18 +244,6 @@ fn print_entry(entry: &LogEntry, output: &OutputFormat, use_color: bool) {
 fn format_human_time(ts: &DateTime<Utc>) -> String {
     let local = ts.with_timezone(&chrono::Local);
     local.format("%Y-%m-%d %H:%M:%S %:z").to_string()
-}
-
-/// Format labels as `{key="val", ...}` for raw output.
-fn format_labels(labels: &std::collections::BTreeMap<String, String>) -> String {
-    if labels.is_empty() {
-        return "{}".to_string();
-    }
-    let parts: Vec<String> = labels
-        .iter()
-        .map(|(k, v)| format!("{}=\"{}\"", k, v))
-        .collect();
-    format!("{{{}}}", parts.join(", "))
 }
 
 /// Colorize a log level string.

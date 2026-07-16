@@ -1,12 +1,12 @@
 use std::collections::BTreeMap;
-use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
-use reqwest::Client;
 use serde::Deserialize;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
+
+use crate::http;
 
 /// A single log line returned from a Loki query.
 #[derive(Debug, Clone)]
@@ -20,7 +20,7 @@ pub struct LogEntry {
 }
 
 /// Query direction for Loki query_range.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Direction {
     Forward,
     Backward,
@@ -33,23 +33,12 @@ impl Direction {
             Direction::Backward => "backward",
         }
     }
-
-    pub fn parse(s: &str) -> Result<Self> {
-        match s {
-            "forward" => Ok(Direction::Forward),
-            "backward" => Ok(Direction::Backward),
-            other => bail!(
-                "invalid direction '{}': expected 'forward' or 'backward'",
-                other
-            ),
-        }
-    }
 }
 
 /// Loki HTTP + WebSocket client.
 pub struct LokiClient {
     endpoint: String,
-    http: Client,
+    http: reqwest::Client,
 }
 
 /// Loki API response envelope: `{ "status": "success", "data": ... }`.
@@ -98,13 +87,9 @@ struct DroppedEntry {
 
 impl LokiClient {
     pub fn new(endpoint: &str) -> Result<Self> {
-        let http = Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .context("failed to build HTTP client")?;
         Ok(Self {
             endpoint: endpoint.trim_end_matches('/').to_string(),
-            http,
+            http: http::build_client()?,
         })
     }
 
@@ -113,9 +98,12 @@ impl LokiClient {
         format!("{}/api/v1/{}", self.endpoint, path)
     }
 
-    /// Build a full WebSocket URL: `wss://<host>/api/v1/<path>`.
+    /// Build a full WebSocket URL: `ws(s)://<host>/api/v1/<path>`.
     fn ws_url(&self, path: &str) -> String {
-        let base = self.endpoint.replacen("https://", "wss://", 1);
+        let base = self
+            .endpoint
+            .replacen("https://", "wss://", 1)
+            .replacen("http://", "ws://", 1);
         format!("{}/api/v1/{}", base, path)
     }
 
@@ -129,10 +117,8 @@ impl LokiClient {
         direction: Direction,
     ) -> Result<Vec<LogEntry>> {
         let url = self.api_url("query_range");
-        let resp = self
-            .http
-            .get(&url)
-            .query(&[
+        let body = http::send_checked(
+            self.http.get(&url).query(&[
                 ("query", query),
                 (
                     "start",
@@ -141,41 +127,11 @@ impl LokiClient {
                 ("end", &end.timestamp_nanos_opt().unwrap_or(0).to_string()),
                 ("limit", &limit.to_string()),
                 ("direction", direction.as_str()),
-            ])
-            .send()
-            .await
-            .context("failed to send query_range request")?;
-
-        let status = resp.status();
-        let body = resp.text().await.context("failed to read response body")?;
-
-        if !status.is_success() {
-            check_http_error(status, &body)?;
-        }
-
-        let parsed: LokiResponse<QueryRangeData> = serde_json::from_str(&body)
-            .with_context(|| format!("failed to parse query_range response: {}", body))?;
-
-        if parsed.status != "success" {
-            bail!(
-                "loki error: {} ({})",
-                parsed.error.unwrap_or_else(|| "unknown".into()),
-                parsed.error_type.unwrap_or_else(|| "unknown".into())
-            );
-        }
-
-        let mut entries = Vec::new();
-        for stream in parsed.data.result {
-            for (ns_ts, line) in stream.values {
-                let ts = parse_ns_timestamp(&ns_ts)?;
-                entries.push(LogEntry {
-                    ts,
-                    labels: stream.stream.clone(),
-                    line,
-                });
-            }
-        }
-        Ok(entries)
+            ]),
+            "failed to send query_range request",
+        )
+        .await?;
+        parse_query_range(&body)
     }
 
     /// Tail logs via WebSocket `/api/v1/tail`.
@@ -187,11 +143,7 @@ impl LokiClient {
         F: FnMut(LogEntry),
     {
         // Loki tail uses a WebSocket connection with query params.
-        let ws_url = format!(
-            "{}?query={}",
-            self.ws_url("tail"),
-            urlencoding::encode_query(query)
-        );
+        let ws_url = format!("{}?query={}", self.ws_url("tail"), http::url_encode(query));
 
         let (ws_stream, _) = connect_async(&ws_url)
             .await
@@ -228,25 +180,34 @@ impl LokiClient {
     }
 }
 
-/// Check HTTP status and produce an appropriate error.
-/// 403 is special-cased with a Feilian hint.
-fn check_http_error(status: reqwest::StatusCode, body: &str) -> Result<()> {
-    if status.as_u16() == 403 {
+/// Parse a Loki query_range response body into log entries.
+///
+/// Shared with the Grafana datasource-proxy client, which proxies a Loki
+/// datasource and returns the same response format.
+pub(crate) fn parse_query_range(body: &str) -> Result<Vec<LogEntry>> {
+    let parsed: LokiResponse<QueryRangeData> = serde_json::from_str(body)
+        .with_context(|| format!("failed to parse query_range response: {}", body))?;
+
+    if parsed.status != "success" {
         bail!(
-            "HTTP 403 Forbidden — endpoint rejected the request.\n\
-             This endpoint is only reachable via Feilian/VPN.\n\
-             Please connect to Feilian first, then retry.\n\
-             \n\
-             response body: {}",
-            truncate(body, 500)
+            "loki error: {} ({})",
+            parsed.error.unwrap_or_else(|| "unknown".into()),
+            parsed.error_type.unwrap_or_else(|| "unknown".into())
         );
     }
-    bail!(
-        "HTTP {} — {}\nresponse body: {}",
-        status.as_u16(),
-        status.canonical_reason().unwrap_or("error"),
-        truncate(body, 500)
-    );
+
+    let mut entries = Vec::new();
+    for stream in parsed.data.result {
+        for (ns_ts, line) in stream.values {
+            let ts = parse_ns_timestamp(&ns_ts)?;
+            entries.push(LogEntry {
+                ts,
+                labels: stream.stream.clone(),
+                line,
+            });
+        }
+    }
+    Ok(entries)
 }
 
 /// Parse a Loki nanosecond-epoch timestamp string into a DateTime.
@@ -258,33 +219,4 @@ fn parse_ns_timestamp(ns: &str) -> Result<DateTime<Utc>> {
     let subsec_nanos = ns % 1_000_000_000;
     DateTime::<Utc>::from_timestamp(secs, subsec_nanos as u32)
         .with_context(|| format!("timestamp out of range: {}", ns))
-}
-
-/// Truncate a string to `max` chars, appending "..." if truncated.
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max])
-    }
-}
-
-/// Minimal URL query encoder for the WebSocket tail URL.
-/// We avoid pulling in another crate just for this.
-mod urlencoding {
-    pub fn encode_query(s: &str) -> String {
-        let mut out = String::with_capacity(s.len() * 3);
-        for byte in s.bytes() {
-            match byte {
-                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                    out.push(byte as char);
-                }
-                _ => {
-                    out.push('%');
-                    out.push_str(&format!("{:02X}", byte));
-                }
-            }
-        }
-        out
-    }
 }
