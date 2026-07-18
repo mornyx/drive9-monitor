@@ -42,20 +42,20 @@ A TOML file at `~/.config/drive9-monitor/config.toml` (overridable via `--config
 default_cluster = "prod"
 
 [jira]
-endpoint = "https://tidb.atlassian.net"
-email = "you@pingcap.com"
+endpoint = "https://your-domain.atlassian.net"
+email = "you@example.com"
 token = "ATATT3xFfGF0..."
 labels = {component = "drive9"}
 
 [clusters."aws-ap-southeast-1"]
 logs.source_type = "loki"
-logs.endpoint = "https://www.ds.ap-southeast-1.aws.observability.tidbcloud.com/loki/self-monitoring/loki"
+logs.endpoint = "https://<o11y-host>/loki/self-monitoring/loki"
 logs.labels = {cluster_env = "prod", cluster = "drive9/eks/ap-southeast-1", app = "drive9-server"}
 metrics.source_type = "prometheus"
-metrics.endpoint = "https://www.ds.ap-southeast-1.aws.observability.tidbcloud.com/internal/metrics/019d3e6c-3e28-7d90-a2f1-2b74e6176cfb"
+metrics.endpoint = "https://<o11y-host>/internal/metrics/<o11y-id>"
 metrics.labels = {container = "drive9-server"}
 alerts.source_type = "alertmanager"
-alerts.endpoint = "https://www.ds.ap-southeast-1.aws.observability.tidbcloud.com/internal/alerts"
+alerts.endpoint = "https://<o11y-host>/internal/alerts"
 alerts.labels = {component = "drive9"}
 
 # ... one entry per cluster ...
@@ -89,7 +89,7 @@ alerts.labels = {component = "drive9"}
 | `alerts.source_type`   | string | no       | `alertmanager`                                   |
 | `alerts.endpoint`      | string | for `alertmanager` | Full Alertmanager base URL                |
 | `alerts.labels`         | map    | no       | Default label selectors appended to every alert query |
-| `jira.endpoint`         | string | yes (for jira-alerts) | Jira base URL (e.g. `https://tidb.atlassian.net`)     |
+| `jira.endpoint`         | string | yes (for jira-alerts) | Jira base URL (e.g. `https://your-domain.atlassian.net`)     |
 | `jira.email`             | string | yes (for jira-alerts) | Atlassian account email for Basic Auth     |
 | `jira.token`             | string | yes (for jira-alerts) | Jira Cloud API token                        |
 | `jira.labels`            | map    | no       | Default JQL conditions (e.g. `{component = "drive9"}`) |
@@ -426,7 +426,7 @@ Query construction:
 
 ### Jira Cloud (`jira.endpoint` / `jira.email` / `jira.token`)
 
-The CLI targets the Jira REST API v3. The `jira.endpoint` in config is the Jira base URL (e.g. `https://tidb.atlassian.net`). API paths are appended directly to the endpoint.
+The CLI targets the Jira REST API v3. The `jira.endpoint` in config is the Jira base URL (e.g. `https://your-domain.atlassian.net`). API paths are appended directly to the endpoint.
 
 | CLI command     | API path                          |
 |-----------------|-----------------------------------|

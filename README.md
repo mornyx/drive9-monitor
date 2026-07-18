@@ -55,7 +55,7 @@ Config file lives at `~/.config/drive9-monitor/config.toml` (overridable via `--
 default_cluster = "prod"
 
 [jira]
-email = "you@pingcap.com"
+email = "you@example.com"
 token = "ATATT3xFfGF0..."
 labels = {component = "drive9"}
 
@@ -251,7 +251,7 @@ Top-level config fields (not per-cluster), under a `[jira]` table:
 
 | Field           | Required | Description                                      |
 |-----------------|----------|--------------------------------------------------|
-| `jira.endpoint` | yes      | Jira base URL (e.g. `https://tidb.atlassian.net`) |
+| `jira.endpoint` | yes      | Jira base URL (e.g. `https://your-domain.atlassian.net`) |
 | `jira.email`    | yes      | Atlassian account email for Basic Auth           |
 | `jira.token`    | yes      | Jira Cloud API token                             |
 | `jira.labels`   | no       | Default JQL conditions (e.g. `{component = "drive9"}`) |
